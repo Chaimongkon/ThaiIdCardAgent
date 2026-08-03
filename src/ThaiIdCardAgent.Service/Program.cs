@@ -79,6 +79,12 @@ builder.WebHost.ConfigureKestrel(options =>
             throw new InvalidOperationException("Production HTTPS certificate is not configured or cannot be found.");
         }
 
+        var certificateErrors = AgentDiagnostics.ValidateCertificate(certificate, "localhost");
+        if (certificateErrors.Count > 0)
+        {
+            throw new InvalidOperationException($"Production HTTPS certificate is invalid: {string.Join("; ", certificateErrors)}.");
+        }
+
         options.ListenLocalhost(18443, listenOptions => listenOptions.UseHttps(certificate));
     }
 
@@ -119,10 +125,14 @@ api.MapGet("/health", () => Results.Ok(new
     version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
     utcTime = DateTimeOffset.UtcNow
 })).AllowAnonymous();
-api.MapGet("/info", (HttpContext context) => Results.Ok(OperationResult<object>.Ok(new
+api.MapGet("/info", (HttpContext context, IWebHostEnvironment environment) => Results.Ok(OperationResult<object>.Ok(new
 {
     service = "Thai ID Card Local Agent",
     version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
+    informationalVersion = typeof(Program).Assembly.GetCustomAttributes(false).OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion,
+    runtimeVersion = Environment.Version.ToString(),
+    environment = environment.EnvironmentName,
+    workstationId = context.User.FindFirstValue("workstation_id"),
     thaiCardProtocol = "not_configured"
 }, context.TraceIdentifier))).RequireAuthorization();
 api.MapGet("/readers", async (HttpContext context, ISmartCardReaderService service, CancellationToken cancellationToken) =>
@@ -251,6 +261,8 @@ public sealed class JwtOptions
 
     public string? PublicKeyPem { get; set; }
 
+    public string? PublicKeyPath { get; set; }
+
     public string? SymmetricSigningKey { get; set; }
 }
 
@@ -279,6 +291,7 @@ public sealed class AgentSecurityOptionsSetup : IConfigureOptions<AgentSecurityO
         _configuration.GetSection("Agent").Bind(options);
         _configuration.GetSection("Security:Jwt").Bind(options.Jwt);
         options.Jwt.PublicKeyPem ??= Environment.GetEnvironmentVariable("Security__Jwt__PublicKeyPem");
+        options.Jwt.PublicKeyPath ??= Environment.GetEnvironmentVariable("Security__Jwt__PublicKeyPath") ?? Environment.GetEnvironmentVariable("Agent__Jwt__PublicKeyPath");
         options.Jwt.SymmetricSigningKey ??= Environment.GetEnvironmentVariable("THAI_ID_AGENT_JWT_SIGNING_KEY");
     }
 }
@@ -411,10 +424,16 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
 
     private static SecurityKey? CreateValidationKey(JwtOptions options)
     {
-        if (!string.IsNullOrWhiteSpace(options.PublicKeyPem))
+        var publicKeyPem = options.PublicKeyPem;
+        if (string.IsNullOrWhiteSpace(publicKeyPem) && !string.IsNullOrWhiteSpace(options.PublicKeyPath) && File.Exists(options.PublicKeyPath))
+        {
+            publicKeyPem = File.ReadAllText(options.PublicKeyPath);
+        }
+
+        if (!string.IsNullOrWhiteSpace(publicKeyPem))
         {
             var rsa = RSA.Create();
-            rsa.ImportFromPem(options.PublicKeyPem);
+            rsa.ImportFromPem(publicKeyPem);
             return new RsaSecurityKey(rsa);
         }
 

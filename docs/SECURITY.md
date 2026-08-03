@@ -1,11 +1,11 @@
-﻿# Security
+# Security
 
 ## Local Binding
 
 The API is designed for loopback only:
 
 - Development HTTP: `http://127.0.0.1:18442`
-- Production HTTPS: `https://127.0.0.1:18443`
+- Production HTTPS: `https://localhost:18443`
 
 Do not expose the service on LAN interfaces.
 
@@ -28,3 +28,7 @@ The current implementation reads reader state and ATR only. It does not read Cit
 ## Error Handling
 
 Production error responses must not include stack traces, inner exceptions, local paths, secrets, or PII. Development may include technical details for diagnostics.
+
+## Private Key ACL
+
+The production HTTPS certificate private key must be readable by the Windows Service account, normally `NT AUTHORITY\LOCAL SERVICE`, and should not grant broad read access to `Everyone` or `BUILTIN\Users`. Use `scripts\Set-CertificatePrivateKeyAcl.ps1` from an elevated administrator shell after the certificate is installed.

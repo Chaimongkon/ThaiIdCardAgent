@@ -2,13 +2,14 @@
 param(
     [string]$Configuration = 'Release',
     [string]$Runtime = 'win-x64',
-    [string]$OutputPath = (Join-Path (Join-Path $PSScriptRoot '..') 'artifacts\publish\win-x64')
+    [string]$OutputPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$OutputPath = if ([string]::IsNullOrWhiteSpace($OutputPath)) { Join-Path $root 'artifacts\publish\win-x64' } else { $OutputPath }
 $project = Join-Path $root 'src\ThaiIdCardAgent.Service\ThaiIdCardAgent.Service.csproj'
 $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
 
@@ -21,6 +22,7 @@ New-Item -ItemType Directory -Force -Path $output | Out-Null
 $args = @(
     'publish', $project,
     '-c', $Configuration,
+    '-m:1', '/nr:false',
     '-r', $Runtime,
     '--self-contained', 'true',
     '-p:PublishSingleFile=true',

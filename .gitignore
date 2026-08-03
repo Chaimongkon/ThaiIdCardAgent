@@ -484,3 +484,10 @@ $RECYCLE.BIN/
 
 **/artifacts/*
 !artifacts/.gitkeep
+# ThaiIdCardAgent local production simulation secrets
+artifacts/test-secrets/
+*.p12
+*.key
+*.private.pem
+*private*.pem
+*.jwt

@@ -59,7 +59,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:18442/api/v1/health"
 Invoke-RestMethod -Uri "http://127.0.0.1:18442/api/v1/readers" -Headers @{ "X-Agent-Development-Key" = "local-test-key" }
 ```
 
-Production binds HTTPS loopback `https://127.0.0.1:18443`; HTTP is Development-only.
+Production binds HTTPS loopback `https://localhost:18443`; HTTP is Development-only. Use `localhost` unless the certificate also contains IP SAN `127.0.0.1`.
 
 Run production diagnostics without opening a listener:
 
@@ -82,6 +82,7 @@ Run production diagnostics without opening a listener:
 ```powershell
 .\scripts\Publish-WinX64.ps1
 .\scripts\Install-Service.ps1 -WhatIf
+.\scripts\Set-CertificatePrivateKeyAcl.ps1 -Thumbprint "<thumbprint>" -Account "NT AUTHORITY\LOCAL SERVICE" -WhatIf
 .\scripts\Uninstall-Service.ps1 -WhatIf
 ```
 
@@ -92,3 +93,6 @@ The install/uninstall scripts require Administrator rights. Do not install or al
 - Thai ID card APDU/data reading is not implemented.
 - The agent has not read Citizen ID, name, address, birth date, or photo.
 - A verified Thai card protocol provider is still required before enabling personal-data reads.
+
+
+See docs/PRODUCTION-SIMULATION.md for the Phase 8 controlled production simulation status and remaining no-go items.

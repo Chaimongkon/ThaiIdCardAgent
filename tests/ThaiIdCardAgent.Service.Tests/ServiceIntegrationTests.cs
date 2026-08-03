@@ -1,4 +1,4 @@
-﻿using System.IdentityModel.Tokens.Jwt;
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -177,6 +177,28 @@ public sealed class ServiceIntegrationTests
 
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, second.StatusCode);
+    }
+    [Fact]
+    public async Task PublicKeyPath_AllowsProductionJwtValidation()
+    {
+        var publicKeyPath = Path.Combine(Path.GetTempPath(), $"thai-id-agent-public-{Guid.NewGuid():N}.pem");
+        await File.WriteAllTextAsync(publicKeyPath, SigningKey.Rsa!.ExportSubjectPublicKeyInfoPem());
+        try
+        {
+            using var factory = CreateFactory("Production", publicKeyPath: publicKeyPath);
+            using var client = CreateProductionClient(factory);
+
+            var response = await client.GetAsync("/api/v1/info");
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Contains("workstation-1", body, StringComparison.Ordinal);
+            Assert.Contains("runtimeVersion", body, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(publicKeyPath);
+        }
     }
 
     [Fact]
@@ -375,7 +397,8 @@ public sealed class ServiceIntegrationTests
         string environment,
         InMemorySmartCardPlatform? platform = null,
         string[]? allowedOrigins = null,
-        Action<IServiceCollection>? configureServices = null)
+        Action<IServiceCollection>? configureServices = null,
+        string? publicKeyPath = null)
     {
         return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -387,9 +410,16 @@ public sealed class ServiceIntegrationTests
                 {
                     ["Security:DevelopmentApiKey"] = DevelopmentKey,
                     ["Agent:Jwt:Issuer"] = "thai-id-card-agent-client",
-                    ["Agent:Jwt:Audience"] = "thai-id-card-agent",
-                    ["Agent:Jwt:PublicKeyPem"] = publicKeyPem
+                    ["Agent:Jwt:Audience"] = "thai-id-card-agent"
                 };
+                if (publicKeyPath is null)
+                {
+                    values["Agent:Jwt:PublicKeyPem"] = publicKeyPem;
+                }
+                else
+                {
+                    values["Agent:Jwt:PublicKeyPath"] = publicKeyPath;
+                }
                 var origins = allowedOrigins ?? ["http://localhost:3000"];
                 for (var index = 0; index < origins.Length; index++)
                 {

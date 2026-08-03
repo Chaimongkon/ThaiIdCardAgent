@@ -6,7 +6,7 @@ param(
     [string]$ProgramPath = 'C:\Program Files\ThaiIdCardAgent',
     [string]$ProgramDataPath = 'C:\ProgramData\ThaiIdCardAgent',
     [string]$PublishPath = (Join-Path (Join-Path $PSScriptRoot '..') 'artifacts\publish\win-x64'),
-    [string]$HealthUri = 'https://127.0.0.1:18443/api/v1/health',
+    [string]$HealthUri = 'https://localhost:18443/api/v1/health',
     [string]$ServiceAccount = 'NT AUTHORITY\LocalService',
     [switch]$SkipStart
 )

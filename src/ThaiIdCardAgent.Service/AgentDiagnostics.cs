@@ -9,8 +9,6 @@ using ThaiIdCardAgent.Pcsc;
 
 public static class AgentDiagnostics
 {
-    private const string LoopbackHost = "127.0.0.1";
-
     public static async Task<int> RunAsync(IConfiguration configuration, IHostEnvironment environment, CancellationToken cancellationToken)
     {
         var checks = new List<DiagnosticCheck>();
@@ -28,9 +26,14 @@ public static class AgentDiagnostics
             || HasValue(Environment.GetEnvironmentVariable("THAI_ID_AGENT_DEV_KEY"));
         checks.Add(Check("Development API key", developmentKeyConfigured ? "configured" : "not configured", environment.IsDevelopment() || !developmentKeyConfigured ? DiagnosticStatus.Pass : DiagnosticStatus.Fail));
 
+        var publicKeyPath = configuration["Agent:Jwt:PublicKeyPath"]
+            ?? configuration["Security:Jwt:PublicKeyPath"]
+            ?? Environment.GetEnvironmentVariable("Agent__Jwt__PublicKeyPath")
+            ?? Environment.GetEnvironmentVariable("Security__Jwt__PublicKeyPath");
         var publicKeyConfigured = HasValue(configuration["Agent:Jwt:PublicKeyPem"])
             || HasValue(configuration["Security:Jwt:PublicKeyPem"])
-            || HasValue(Environment.GetEnvironmentVariable("Security__Jwt__PublicKeyPem"));
+            || HasValue(Environment.GetEnvironmentVariable("Security__Jwt__PublicKeyPem"))
+            || (HasValue(publicKeyPath) && File.Exists(publicKeyPath));
         var symmetricKeyConfigured = HasValue(configuration["Agent:Jwt:SymmetricSigningKey"])
             || HasValue(configuration["Security:Jwt:SymmetricSigningKey"])
             || HasValue(Environment.GetEnvironmentVariable("THAI_ID_AGENT_JWT_SIGNING_KEY"));
@@ -54,6 +57,32 @@ public static class AgentDiagnostics
         return checks.Any(check => check.Status == DiagnosticStatus.Fail) ? 1 : 0;
     }
 
+    public static IReadOnlyList<string> ValidateCertificate(X509Certificate2 certificate, string expectedHost)
+    {
+        var errors = new List<string>();
+        var now = DateTimeOffset.UtcNow;
+        if (now < certificate.NotBefore || now > certificate.NotAfter)
+        {
+            errors.Add("certificate is expired or not yet valid");
+        }
+
+        if (!CertificatePrivateKeyUsable(certificate))
+        {
+            errors.Add("certificate private key is missing or not usable");
+        }
+
+        if (!CertificateHasServerAuthentication(certificate))
+        {
+            errors.Add("certificate does not have Server Authentication EKU");
+        }
+
+        if (!CertificateMatchesHost(certificate, expectedHost))
+        {
+            errors.Add("certificate SAN does not match configured HTTPS host");
+        }
+
+        return errors;
+    }
     public static X509Certificate2? FindConfiguredCertificate(IConfiguration configuration)
     {
         var options = new HttpsCertificateOptions();
@@ -100,7 +129,7 @@ public static class AgentDiagnostics
 
         yield return Check("HTTPS certificate", $"found thumbprint {certificate.Thumbprint}", DiagnosticStatus.Pass);
         yield return Check("HTTPS certificate private key", CertificatePrivateKeyUsable(certificate) ? "usable by current process" : "missing or not usable", CertificatePrivateKeyUsable(certificate) ? DiagnosticStatus.Pass : DiagnosticStatus.Fail);
-        yield return Check("HTTPS certificate SAN", CertificateHasLoopbackName(certificate) ? "contains localhost or 127.0.0.1" : "does not contain localhost or 127.0.0.1", CertificateHasLoopbackName(certificate) ? DiagnosticStatus.Pass : DiagnosticStatus.Fail);
+        yield return Check("HTTPS certificate SAN", CertificateMatchesHost(certificate, "localhost") ? "matches localhost" : "does not match localhost", CertificateMatchesHost(certificate, "localhost") ? DiagnosticStatus.Pass : DiagnosticStatus.Fail);
 
         using var chain = new X509Chain();
         var trusted = chain.Build(certificate);
@@ -184,17 +213,28 @@ public static class AgentDiagnostics
             return false;
         }
     }
-    private static bool CertificateHasLoopbackName(X509Certificate2 certificate)
+    private static bool CertificateHasServerAuthentication(X509Certificate2 certificate)
     {
-        var subjectAlternativeName = certificate.Extensions
-            .OfType<X509Extension>()
-            .FirstOrDefault(extension => string.Equals(extension.Oid?.Value, "2.5.29.17", StringComparison.Ordinal));
-        var sanText = subjectAlternativeName?.Format(false) ?? string.Empty;
-        return sanText.Contains("localhost", StringComparison.OrdinalIgnoreCase)
-            || sanText.Contains(LoopbackHost, StringComparison.OrdinalIgnoreCase)
-            || certificate.GetNameInfo(X509NameType.DnsName, forIssuer: false).Contains("localhost", StringComparison.OrdinalIgnoreCase);
+        var eku = certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>().FirstOrDefault();
+        return eku is null || eku.EnhancedKeyUsages.OfType<System.Security.Cryptography.Oid>().Any(oid => string.Equals(oid.Value, "1.3.6.1.5.5.7.3.1", StringComparison.Ordinal));
     }
 
+    private static bool CertificateMatchesHost(X509Certificate2 certificate, string expectedHost)
+    {
+        var san = certificate.Extensions
+            .OfType<X509Extension>()
+            .FirstOrDefault(extension => string.Equals(extension.Oid?.Value, "2.5.29.17", StringComparison.Ordinal))
+            ?.Format(false) ?? string.Empty;
+
+        if (System.Net.IPAddress.TryParse(expectedHost, out _))
+        {
+            return san.Contains($"IP Address={expectedHost}", StringComparison.OrdinalIgnoreCase)
+                || san.Contains($"IPAddress={expectedHost}", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return san.Contains($"DNS Name={expectedHost}", StringComparison.OrdinalIgnoreCase)
+            || certificate.GetNameInfo(X509NameType.DnsName, forIssuer: false).Equals(expectedHost, StringComparison.OrdinalIgnoreCase);
+    }
     private static string NormalizeThumbprint(string thumbprint) => thumbprint.Replace(" ", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
 
     private static bool HasValue(string? value) => !string.IsNullOrWhiteSpace(value);

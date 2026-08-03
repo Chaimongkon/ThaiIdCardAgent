@@ -1,4 +1,4 @@
-﻿# Configuration
+# Configuration
 
 ## Development
 
@@ -13,7 +13,7 @@ Development HTTP is loopback-only on `http://127.0.0.1:18442`. Development CORS 
 
 ## Production
 
-Production uses HTTPS loopback `https://127.0.0.1:18443`; HTTP is disabled. JWT validation requires:
+Production uses HTTPS loopback `https://localhost:18443`; HTTP is disabled. Use `127.0.0.1` only when the certificate contains IP SAN `127.0.0.1`. JWT validation requires:
 
 - issuer
 - audience `thai-id-card-agent`
@@ -26,6 +26,13 @@ Production uses HTTPS loopback `https://127.0.0.1:18443`; HTTP is disabled. JWT 
 - maximum lifetime 60 seconds
 
 Configure only public verification material or authority configuration in the agent. Signing private keys must stay outside the agent.
+
+Supported public key configuration examples:
+
+```powershell
+$env:Agent__Jwt__PublicKeyPath = 'C:\ProgramData\ThaiIdCardAgent\Config\jwt-public.pem'
+$env:Security__Jwt__PublicKeyPem = '<public-pem-only>'
+```
 
 ## CORS
 

@@ -1,9 +1,9 @@
-﻿# API
+# API
 
 Base URL:
 
 - Development: `http://127.0.0.1:18442`
-- Production: `https://127.0.0.1:18443`
+- Production: `https://localhost:18443`
 
 The service binds loopback only. Do not bind to `0.0.0.0`, `*`, `+`, or LAN addresses.
 

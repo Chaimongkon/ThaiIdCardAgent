@@ -2,7 +2,7 @@
 
 Review date: 2026-08-03
 Branch: `main`
-Scope: Phase 7 production readiness review for ThaiIdCardAgent.
+Scope: Phase 7 production readiness review for ThaiIdCardAgent. Phase 8 simulation details are in `docs/PRODUCTION-SIMULATION.md`.
 
 ## 1. Executive Summary
 
@@ -63,13 +63,13 @@ The install script now supports upgrade/reinstall by stopping an existing servic
 
 ## 7. HTTPS Status
 
-Production HTTPS binding is loopback-only on `https://127.0.0.1:18443`.
+Production HTTPS binding is loopback-only on `https://localhost:18443`; the certificate must match the host name used by clients.
 
 Production diagnostics found an HTTPS certificate in the LocalMachine store with:
 
 - trusted chain: passed.
 - private key visible to current process: passed.
-- SAN contains localhost or 127.0.0.1: passed.
+- SAN matches localhost: passed for the current certificate. IP address `127.0.0.1` is not covered unless an IP SAN is added.
 
 Console-mode Production HTTPS was attempted from the published executable. The process listened on `https://localhost:18443`, and HTTP `18442` was not available, but PowerShell and `curl.exe` failed the TLS handshake without bypassing certificate validation. `curl.exe` reported `SEC_E_NO_CREDENTIALS (0x8009030e)`. This is not marked as passed.
 
