@@ -74,7 +74,13 @@ public sealed class PollingSmartCardMonitor : ISmartCardMonitor
             }
             catch (Exception exception)
             {
-                ReaderEventReceived?.Invoke(this, new ReaderEvent(string.Empty, ReaderEventType.Error, exception.GetType().Name, DateTimeOffset.UtcNow));
+                ReaderEventReceived?.Invoke(this, new ReaderEvent(
+                    string.Empty,
+                    ReaderEventType.Error,
+                    null,
+                    DateTimeOffset.UtcNow,
+                    TechnicalDetail: $"{exception.GetType().Name}: {exception.Message}"));
+                await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -85,30 +91,38 @@ public sealed class PollingSmartCardMonitor : ISmartCardMonitor
         var current = readers.ToDictionary(reader => reader.Name, StringComparer.OrdinalIgnoreCase);
         foreach (var reader in current.Values)
         {
+            var newState = StateName(reader.IsCardPresent);
             if (!_lastSnapshot.TryGetValue(reader.Name, out var previous))
             {
-                Raise(reader.Name, ReaderEventType.ReaderConnected, reader.Atr);
+                Raise(reader.Name, ReaderEventType.ReaderConnected, reader.Atr, null, newState, reader.IsCardPresent);
                 if (reader.IsCardPresent)
                 {
-                    Raise(reader.Name, ReaderEventType.CardInserted, reader.Atr);
+                    Raise(reader.Name, ReaderEventType.CardInserted, reader.Atr, StateName(false), newState, true);
                 }
 
                 continue;
             }
 
+            var previousState = StateName(previous.IsCardPresent);
             if (previous.IsCardPresent != reader.IsCardPresent)
             {
-                Raise(reader.Name, reader.IsCardPresent ? ReaderEventType.CardInserted : ReaderEventType.CardRemoved, reader.Atr);
+                Raise(
+                    reader.Name,
+                    reader.IsCardPresent ? ReaderEventType.CardInserted : ReaderEventType.CardRemoved,
+                    reader.Atr,
+                    previousState,
+                    newState,
+                    reader.IsCardPresent);
             }
             else if (!string.Equals(previous.Atr, reader.Atr, StringComparison.OrdinalIgnoreCase))
             {
-                Raise(reader.Name, ReaderEventType.StatusChanged, reader.Atr);
+                Raise(reader.Name, ReaderEventType.StatusChanged, reader.Atr, previousState, newState, reader.IsCardPresent);
             }
         }
 
         foreach (var removed in _lastSnapshot.Keys.Except(current.Keys, StringComparer.OrdinalIgnoreCase).ToArray())
         {
-            Raise(removed, ReaderEventType.ReaderDisconnected, null);
+            Raise(removed, ReaderEventType.ReaderDisconnected, null, _lastSnapshot[removed].IsCardPresent ? "Present" : "Empty", null, null);
         }
 
         _lastSnapshot.Clear();
@@ -118,8 +132,10 @@ public sealed class PollingSmartCardMonitor : ISmartCardMonitor
         }
     }
 
-    private void Raise(string readerName, ReaderEventType eventType, string? atr)
+    private static string StateName(bool isCardPresent) => isCardPresent ? "Present" : "Empty";
+
+    private void Raise(string readerName, ReaderEventType eventType, string? atr, string? previousState, string? newState, bool? isCardPresent)
     {
-        ReaderEventReceived?.Invoke(this, new ReaderEvent(readerName, eventType, atr, DateTimeOffset.UtcNow));
+        ReaderEventReceived?.Invoke(this, new ReaderEvent(readerName, eventType, atr, DateTimeOffset.UtcNow, previousState, newState, isCardPresent));
     }
 }

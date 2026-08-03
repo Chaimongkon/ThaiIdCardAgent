@@ -12,7 +12,20 @@ public class InMemorySmartCardPlatform : IPcscPlatform
 
     public void SetReader(string readerName, SmartCardPresenceStatus status, byte[]? atr = null)
     {
-        _readers[readerName] = new PcscReaderState(readerName, status, atr, DateTimeOffset.UtcNow);
+        SetReaderState(readerName, ToEventState(status), atr);
+    }
+
+    public void SetReaderState(string readerName, PcscState eventState, byte[]? atr = null, int? atrLength = null)
+    {
+        var trimmedAtr = PcscStateMapper.TrimAtr(atr, atrLength ?? atr?.Length ?? 0);
+        _readers[readerName] = new PcscReaderState(
+            readerName,
+            PcscStateMapper.ToPresenceStatus(eventState),
+            trimmedAtr.Length > 0 ? trimmedAtr : null,
+            DateTimeOffset.UtcNow,
+            PcscState.Unaware,
+            eventState,
+            trimmedAtr.Length);
     }
 
     public void RemoveReader(string readerName) => _readers.TryRemove(readerName, out _);
@@ -43,4 +56,14 @@ public class InMemorySmartCardPlatform : IPcscPlatform
             throw _failure;
         }
     }
+
+    private static PcscState ToEventState(SmartCardPresenceStatus status) => status switch
+    {
+        SmartCardPresenceStatus.ReaderUnavailable => PcscState.Unavailable,
+        SmartCardPresenceStatus.NoCard => PcscState.Empty,
+        SmartCardPresenceStatus.CardPresent => PcscState.Present,
+        SmartCardPresenceStatus.CardMute => PcscState.Present | PcscState.Mute,
+        SmartCardPresenceStatus.CardUnpowered => PcscState.Present | PcscState.Unpowered,
+        _ => PcscState.Unaware
+    };
 }

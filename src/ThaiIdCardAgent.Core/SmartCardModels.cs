@@ -27,7 +27,11 @@ public sealed record ReaderEvent(
     string ReaderName,
     ReaderEventType EventType,
     string? Atr,
-    DateTimeOffset OccurredAtUtc);
+    DateTimeOffset OccurredAtUtc,
+    string? PreviousState = null,
+    string? NewState = null,
+    bool? IsCardPresent = null,
+    string? TechnicalDetail = null);
 
 public enum ReaderEventType
 {

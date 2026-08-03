@@ -26,9 +26,18 @@ public sealed class PcscSmartCardReaderService : ISmartCardReaderService
             try
             {
                 var state = await _platform.GetReaderStateAsync(reader, timeout.Token).ConfigureAwait(false);
-                result.Add(new SmartCardReaderInfo(reader, true, state.Status == SmartCardPresenceStatus.CardPresent, ToAtrHex(state.Atr), state.CheckedAtUtc));
+                result.Add(new SmartCardReaderInfo(
+                    state.ReaderName,
+                    state.IsReaderAvailable,
+                    state.IsCardPresent,
+                    state.IsCardPresent ? ToAtrHex(state.Atr) : null,
+                    state.CheckedAtUtc));
             }
-            catch (AgentException)
+            catch (ReaderNotFoundException)
+            {
+                result.Add(new SmartCardReaderInfo(reader, false, false, null, DateTimeOffset.UtcNow));
+            }
+            catch (SmartCardCommunicationException)
             {
                 result.Add(new SmartCardReaderInfo(reader, false, false, null, DateTimeOffset.UtcNow));
             }
@@ -50,7 +59,7 @@ public sealed class PcscSmartCardReaderService : ISmartCardReaderService
         try
         {
             var state = await _platform.GetReaderStateAsync(readerName, timeout.Token).ConfigureAwait(false);
-            return new SmartCardStatus(readerName, state.Status, ToAtrHex(state.Atr), state.CheckedAtUtc);
+            return new SmartCardStatus(state.ReaderName, state.Status, state.IsCardPresent ? ToAtrHex(state.Atr) : null, state.CheckedAtUtc);
         }
         finally
         {
@@ -60,14 +69,23 @@ public sealed class PcscSmartCardReaderService : ISmartCardReaderService
 
     public async Task<byte[]> GetAtrAsync(string readerName, CancellationToken cancellationToken = default)
     {
-        var status = await GetStatusAsync(readerName, cancellationToken).ConfigureAwait(false);
-        if (status.Status != SmartCardPresenceStatus.CardPresent)
+        ArgumentException.ThrowIfNullOrWhiteSpace(readerName);
+        using var timeout = CreateTimeout(cancellationToken);
+        var gate = _readerLocks.GetOrAdd(readerName, static _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(TimeSpan.Zero, timeout.Token).ConfigureAwait(false))
         {
-            throw new CardNotPresentException(readerName);
+            throw new SmartCardBusyException(readerName);
         }
 
-        var state = await _platform.GetReaderStateAsync(readerName, cancellationToken).ConfigureAwait(false);
-        return state.Atr is { Length: > 0 } ? state.Atr : throw new CardNotPresentException(readerName);
+        try
+        {
+            var state = await _platform.GetReaderStateAsync(readerName, timeout.Token).ConfigureAwait(false);
+            return state is { IsCardPresent: true, Atr.Length: > 0 } ? state.Atr : throw new CardNotPresentException(state.ReaderName);
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     private CancellationTokenSource CreateTimeout(CancellationToken cancellationToken)

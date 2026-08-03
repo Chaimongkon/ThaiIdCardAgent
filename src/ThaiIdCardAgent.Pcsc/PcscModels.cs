@@ -6,7 +6,15 @@ public sealed record PcscReaderState(
     string ReaderName,
     SmartCardPresenceStatus Status,
     byte[]? Atr,
-    DateTimeOffset CheckedAtUtc);
+    DateTimeOffset CheckedAtUtc,
+    PcscState CurrentState = PcscState.Unaware,
+    PcscState EventState = PcscState.Unaware,
+    int AtrLength = 0)
+{
+    public bool IsReaderAvailable => PcscStateMapper.IsReaderAvailable(EventState);
+
+    public bool IsCardPresent => PcscStateMapper.IsCardPresent(EventState);
+}
 
 public interface IPcscPlatform
 {

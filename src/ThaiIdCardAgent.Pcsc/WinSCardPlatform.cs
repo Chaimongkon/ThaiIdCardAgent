@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Text;
 using ThaiIdCardAgent.Core;
 
 namespace ThaiIdCardAgent.Pcsc;
@@ -37,72 +36,47 @@ public sealed class WinSCardPlatform : IPcscPlatform
         ArgumentException.ThrowIfNullOrWhiteSpace(readerName);
         cancellationToken.ThrowIfCancellationRequested();
         var readers = await ListReadersAsync(cancellationToken).ConfigureAwait(false);
-        if (!readers.Contains(readerName, StringComparer.OrdinalIgnoreCase))
+        var resolvedReaderName = readers.FirstOrDefault(reader => string.Equals(reader, readerName, StringComparison.OrdinalIgnoreCase));
+        if (resolvedReaderName is null)
         {
             throw new ReaderNotFoundException(readerName);
         }
 
         var context = EstablishContext();
-        IntPtr card = IntPtr.Zero;
         try
         {
-            var connectResult = NativeMethods.SCardConnect(
-                context,
-                readerName,
-                NativeMethods.SCARD_SHARE_SHARED,
-                NativeMethods.SCARD_PROTOCOL_T0 | NativeMethods.SCARD_PROTOCOL_T1,
-                out card,
-                out _);
-
-            if (connectResult is NativeMethods.SCARD_E_NO_SMARTCARD or NativeMethods.SCARD_W_REMOVED_CARD)
+            var readerStates = new[]
             {
-                return new PcscReaderState(readerName, SmartCardPresenceStatus.NoCard, null, DateTimeOffset.UtcNow);
-            }
+                new NativeMethods.SCARD_READERSTATE
+                {
+                    ReaderName = resolvedReaderName,
+                    CurrentState = (uint)PcscState.Unaware,
+                    EventState = (uint)PcscState.Unaware,
+                    Atr = new byte[NativeMethods.SCARD_ATR_LENGTH]
+                }
+            };
 
-            if (connectResult == NativeMethods.SCARD_E_SHARING_VIOLATION)
-            {
-                throw new SmartCardBusyException(readerName);
-            }
+            var result = NativeMethods.SCardGetStatusChange(context, 0, readerStates, readerStates.Length);
+            ThrowIfFailure(result, "Unable to read smart card reader state.");
 
-            if (connectResult is NativeMethods.SCARD_E_READER_UNAVAILABLE or NativeMethods.SCARD_E_UNKNOWN_READER)
-            {
-                throw new ReaderNotFoundException(readerName);
-            }
-
-            ThrowIfFailure(connectResult, "Unable to connect to smart card reader.");
-            var atr = ReadAtr(card, readerName);
-            return new PcscReaderState(readerName, SmartCardPresenceStatus.CardPresent, atr, DateTimeOffset.UtcNow);
+            var state = readerStates[0];
+            var currentState = (PcscState)state.CurrentState;
+            var eventState = (PcscState)state.EventState;
+            var presenceStatus = PcscStateMapper.ToPresenceStatus(eventState);
+            var atr = PcscStateMapper.TrimAtr(state.Atr, (int)state.AtrLength);
+            return new PcscReaderState(
+                resolvedReaderName,
+                presenceStatus,
+                atr.Length > 0 ? atr : null,
+                DateTimeOffset.UtcNow,
+                currentState,
+                eventState,
+                (int)state.AtrLength);
         }
         finally
         {
-            if (card != IntPtr.Zero)
-            {
-                _ = NativeMethods.SCardDisconnect(card, NativeMethods.SCARD_LEAVE_CARD);
-            }
-
             _ = NativeMethods.SCardReleaseContext(context);
         }
-    }
-
-    private static byte[] ReadAtr(IntPtr card, string readerName)
-    {
-        var readerLength = 0;
-        var atrLength = 64;
-        var atr = new byte[atrLength];
-        var result = NativeMethods.SCardStatus(card, null, ref readerLength, out var state, out _, atr, ref atrLength);
-        if (result is NativeMethods.SCARD_W_REMOVED_CARD or NativeMethods.SCARD_E_NO_SMARTCARD)
-        {
-            throw new CardRemovedException(readerName);
-        }
-
-        ThrowIfFailure(result, "Unable to read smart card ATR.");
-        if ((state & NativeMethods.SCARD_PRESENT) != NativeMethods.SCARD_PRESENT)
-        {
-            throw new CardNotPresentException(readerName);
-        }
-
-        Array.Resize(ref atr, atrLength);
-        return atr;
     }
 
     private static IntPtr EstablishContext()
@@ -129,6 +103,11 @@ public sealed class WinSCardPlatform : IPcscPlatform
             throw new SmartCardServiceUnavailableException(message);
         }
 
+        if (result is NativeMethods.SCARD_E_READER_UNAVAILABLE or NativeMethods.SCARD_E_UNKNOWN_READER)
+        {
+            throw new SmartCardCommunicationException($"{message} Reader unavailable. PC/SC error 0x{result:X8}.");
+        }
+
         throw new SmartCardCommunicationException($"{message} PC/SC error 0x{result:X8}.");
     }
 
@@ -137,17 +116,28 @@ public sealed class WinSCardPlatform : IPcscPlatform
         public const int SCARD_S_SUCCESS = 0;
         public const int SCARD_E_NO_SERVICE = -2146435043;
         public const int SCARD_E_NO_READERS_AVAILABLE = -2146435026;
-        public const int SCARD_E_NO_SMARTCARD = -2146435060;
         public const int SCARD_E_UNKNOWN_READER = -2146435063;
         public const int SCARD_E_READER_UNAVAILABLE = -2146435045;
-        public const int SCARD_E_SHARING_VIOLATION = -2146435061;
-        public const int SCARD_W_REMOVED_CARD = -2146434967;
         public const uint SCARD_SCOPE_SYSTEM = 2;
-        public const uint SCARD_SHARE_SHARED = 2;
-        public const uint SCARD_PROTOCOL_T0 = 1;
-        public const uint SCARD_PROTOCOL_T1 = 2;
-        public const uint SCARD_LEAVE_CARD = 0;
-        public const uint SCARD_PRESENT = 0x20;
+        public const int SCARD_ATR_LENGTH = 36;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct SCARD_READERSTATE
+        {
+            [MarshalAs(UnmanagedType.LPTStr)]
+            public string? ReaderName;
+
+            public IntPtr UserData;
+
+            public uint CurrentState;
+
+            public uint EventState;
+
+            public uint AtrLength;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = SCARD_ATR_LENGTH)]
+            public byte[]? Atr;
+        }
 
         [DllImport("winscard.dll", CharSet = CharSet.Unicode)]
         public static extern int SCardEstablishContext(uint dwScope, IntPtr pvReserved1, IntPtr pvReserved2, out IntPtr phContext);
@@ -156,13 +146,7 @@ public sealed class WinSCardPlatform : IPcscPlatform
         public static extern int SCardListReaders(IntPtr hContext, string? mszGroups, char[]? mszReaders, ref int pcchReaders);
 
         [DllImport("winscard.dll", CharSet = CharSet.Unicode)]
-        public static extern int SCardConnect(IntPtr hContext, string szReader, uint dwShareMode, uint dwPreferredProtocols, out IntPtr phCard, out uint pdwActiveProtocol);
-
-        [DllImport("winscard.dll", CharSet = CharSet.Unicode)]
-        public static extern int SCardStatus(IntPtr hCard, StringBuilder? mszReaderNames, ref int pcchReaderLen, out uint pdwState, out uint pdwProtocol, byte[] pbAtr, ref int pcbAtrLen);
-
-        [DllImport("winscard.dll")]
-        public static extern int SCardDisconnect(IntPtr hCard, uint dwDisposition);
+        public static extern int SCardGetStatusChange(IntPtr hContext, int dwTimeout, [In, Out] SCARD_READERSTATE[] rgReaderStates, int cReaders);
 
         [DllImport("winscard.dll")]
         public static extern int SCardReleaseContext(IntPtr hContext);

@@ -24,7 +24,7 @@ try
         "status" => await ShowStatusAsync(service, readerName, cancellation.Token).ConfigureAwait(false),
         "atr" => await ShowAtrAsync(service, readerName, cancellation.Token).ConfigureAwait(false),
         "monitor" => await MonitorAsync(service, cancellation.Token).ConfigureAwait(false),
-        "diagnostics" => await ShowDiagnosticsAsync(service, cancellation.Token).ConfigureAwait(false),
+        "diagnostics" => await ShowDiagnosticsAsync(service, platform, cancellation.Token).ConfigureAwait(false),
         "read" => await ReadThaiCardAsync(thaiCardReader, service, readerName, cancellation.Token).ConfigureAwait(false),
         _ => ShowUsage()
     };
@@ -88,7 +88,7 @@ static async Task<int> ShowStatusAsync(ISmartCardReaderService service, string? 
         Console.WriteLine($"Reader count: {readers.Count}");
         foreach (var reader in readers)
         {
-            Console.WriteLine($"- {reader.Name}: cardPresent={reader.IsCardPresent}, atr={reader.Atr ?? "-"}");
+            Console.WriteLine($"- {reader.Name}: connected={reader.IsConnected}, cardPresent={reader.IsCardPresent}, atr={reader.Atr ?? "-"}");
         }
 
         return readers.Count == 0 ? 2 : 0;
@@ -112,7 +112,17 @@ static async Task<int> ShowAtrAsync(ISmartCardReaderService service, string? rea
 static async Task<int> MonitorAsync(ISmartCardReaderService service, CancellationToken cancellationToken)
 {
     await using var monitor = new PollingSmartCardMonitor(service);
-    monitor.ReaderEventReceived += (_, readerEvent) => Console.WriteLine($"{readerEvent.OccurredAtUtc:O} {readerEvent.EventType} {readerEvent.ReaderName} {readerEvent.Atr ?? string.Empty}");
+    monitor.ReaderEventReceived += (_, readerEvent) =>
+    {
+        if (readerEvent.EventType == ReaderEventType.Error)
+        {
+            Console.WriteLine($"{readerEvent.OccurredAtUtc:O} MonitorException {readerEvent.TechnicalDetail}");
+            return;
+        }
+
+        Console.WriteLine(
+            $"{readerEvent.OccurredAtUtc:O} {readerEvent.EventType} ReaderName=\"{readerEvent.ReaderName}\" PreviousState={readerEvent.PreviousState ?? "-"} NewState={readerEvent.NewState ?? "-"} CardPresent={readerEvent.IsCardPresent?.ToString() ?? "-"} ATR={readerEvent.Atr ?? "-"}");
+    };
     await monitor.StartAsync(cancellationToken).ConfigureAwait(false);
     Console.WriteLine("Monitoring smart card readers. Press Ctrl+C to stop.");
     try
@@ -127,14 +137,27 @@ static async Task<int> MonitorAsync(ISmartCardReaderService service, Cancellatio
     return 0;
 }
 
-static async Task<int> ShowDiagnosticsAsync(ISmartCardReaderService service, CancellationToken cancellationToken)
+static async Task<int> ShowDiagnosticsAsync(ISmartCardReaderService service, IPcscPlatform platform, CancellationToken cancellationToken)
 {
     Console.WriteLine($"OS Version: {Environment.OSVersion}");
     Console.WriteLine($"Process Architecture: {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}");
     Console.WriteLine($".NET Runtime Version: {Environment.Version}");
     Console.WriteLine("Smart Card Service Status: checked through PC/SC context");
     Console.WriteLine($"Agent Version: {typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0"}");
-    return await ShowReadersAsync(service, cancellationToken).ConfigureAwait(false) == 2 ? 0 : 0;
+
+    var exitCode = await ShowReadersAsync(service, cancellationToken).ConfigureAwait(false);
+    var readers = await platform.ListReadersAsync(cancellationToken).ConfigureAwait(false);
+    foreach (var reader in readers)
+    {
+        var state = await platform.GetReaderStateAsync(reader, cancellationToken).ConfigureAwait(false);
+        Console.WriteLine($"Diagnostics ReaderName=\"{state.ReaderName}\"");
+        Console.WriteLine($"  CurrentState: {state.CurrentState}");
+        Console.WriteLine($"  EventState: {state.EventState}");
+        Console.WriteLine($"  ATR bytes: {(state.Atr is { Length: > 0 } ? AtrFormatter.ToHex(state.Atr) : "-")}");
+        Console.WriteLine($"  ATR length: {state.AtrLength}");
+    }
+
+    return exitCode == 2 ? 0 : exitCode;
 }
 
 static async Task<int> ReadThaiCardAsync(IThaiIdCardReader thaiCardReader, ISmartCardReaderService service, string? readerName, CancellationToken cancellationToken)

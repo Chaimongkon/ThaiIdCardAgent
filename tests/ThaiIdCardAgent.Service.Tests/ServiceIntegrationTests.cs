@@ -187,7 +187,7 @@ public sealed class ServiceIntegrationTests
             builder.ConfigureTestServices(services =>
             {
                 var fake = new InMemorySmartCardPlatform();
-                fake.SetReader("Reader A", SmartCardPresenceStatus.CardPresent, [0x3B, 0x67, 0x00]);
+                fake.SetReader("Reader A", SmartCardPresenceStatus.CardPresent, [0x01, 0x02, 0x00]);
                 services.RemoveAll<IPcscPlatform>();
                 services.AddSingleton<IPcscPlatform>(fake);
             });
