@@ -1,21 +1,42 @@
-# Configuration
+﻿# Configuration
 
-Development:
+## Development
 
-- `Agent:DevelopmentKey` or `THAI_ID_AGENT_DEV_KEY` enables `X-Agent-Development-Key` authentication.
-- `Agent:AllowedOrigins` must contain exact origins only.
-- `http://localhost:3000` is allowed only by Development configuration.
+Development authentication uses header `X-Agent-Development-Key`. Configure the key outside Git:
 
-Production:
+```powershell
+dotnet user-secrets set "Security:DevelopmentApiKey" "local-test-key" --project ".\src\ThaiIdCardAgent.Service"
+$env:Security__DevelopmentApiKey = "local-test-key"
+```
 
-- HTTP is disabled in Production.
-- HTTPS binds to loopback port `18443` in Production. Development HTTPS is opt-in with `Agent:EnableHttpsInDevelopment=true`.
-- JWT audience is `thai-id-card-agent`.
-- JWT lifetime must be 60 seconds or less.
-- Signing must happen outside the agent.
+Development HTTP is loopback-only on `http://127.0.0.1:18442`. Development CORS allows only exact configured origins, with `http://localhost:3000` in `appsettings.Development.json`.
 
-Default paths:
+## Production
+
+Production uses HTTPS loopback `https://127.0.0.1:18443`; HTTP is disabled. JWT validation requires:
+
+- issuer
+- audience `thai-id-card-agent`
+- signature
+- expiration
+- not-before
+- `jti`
+- `sub`
+- `workstation_id`
+- maximum lifetime 60 seconds
+
+Configure only public verification material or authority configuration in the agent. Signing private keys must stay outside the agent.
+
+## CORS
+
+Allowed origins must be exact strings. Wildcards, `AllowAnyOrigin`, and origin reflection are not allowed.
+
+## PC/SC
+
+`Pcsc:TimeoutSeconds` defaults to 10 seconds and must stay between 1 and 120 seconds. Reader-level operations use per-reader locking in the PC/SC service, not a global lock.
+
+## Paths
 
 - Program: `C:\Program Files\ThaiIdCardAgent`
-- Configuration: `C:\ProgramData\ThaiIdCardAgent\Config`
+- Config: `C:\ProgramData\ThaiIdCardAgent\Config`
 - Logs: `C:\ProgramData\ThaiIdCardAgent\Logs`

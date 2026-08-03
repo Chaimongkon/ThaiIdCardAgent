@@ -1,40 +1,61 @@
-# Implementation Status
+﻿# Implementation Status
 
 ## Implemented
 
 - .NET 10 solution and project structure.
 - Core models, interfaces, result model, exceptions, error mapping, and PII redaction.
 - Windows PC/SC reader listing, card presence, ATR, and polling monitor.
-- In-memory PC/SC adapter for tests.
-- Console commands: `readers`, `status`, `atr`, `monitor`, `diagnostics`, `read`.
-- Minimal API and Windows Service hosting configuration.
-- Development key auth, production JWT validation, replay detection, and exact-origin CORS.
-- Publish/install/start/stop/uninstall/certificate/test PowerShell scripts.
-- Next.js client example.
+- Bitwise PC/SC state mapping for combined flags.
+- Minimal API with authenticated local smart card endpoints.
+- Development key authentication from configuration/user secrets/environment.
+- Production JWT validation with issuer, audience, lifetime, required claims, and replay detection.
+- Exact-origin CORS.
+- Windows Service hosting configuration.
+- Publish/install/uninstall/certificate scripts with `-WhatIf` support where applicable.
+- Next.js TypeScript client and example component.
 
-## Tested without hardware
+## Tested Without Hardware
 
-- Restore and Release build.
-- Non-hardware tests: Core 3, PCSC 8, Service 11.
-- Development API health endpoint over HTTP loopback `18442`.
-- win-x64 publish to `artifacts/publish/win-x64`.
-- Unit tests for redaction, result/error mapping, fake reader scenarios, ATR, no-card, missing-reader, service failure, and busy reader.
-- Integration tests for health, auth, JWT failures, replay, CORS, and protocol-not-configured response.
+- Release build with SDK 10.0.302 using `-m:1` on this machine.
+- Non-hardware tests: Core 3, PCSC 18, Service 24.
+- Integration coverage for health, auth failures, Development key, JWT failures, replay token, CORS, reader selection, missing reader, no card, ATR success, agent busy, protocol-not-configured, requestId, and production error redaction.
+- win-x64 publish produced `artifacts\publish\win-x64\ThaiIdCardAgent.Service.exe`.
+- Published executable ran in console mode and returned healthy on `GET /api/v1/health`.
+- Install/uninstall/certificate scripts were checked with `-WhatIf`; Windows Service was not installed by Codex.
 
-## Tested with hardware
+## Tested With Hardware
 
-- Not tested in this workspace.
+Test date: 3 สิงหาคม 2569
 
-## Not implemented
+- Reader: Identive SCR33xx v2.0 USB SC Reader 0
+- Reader Detection: ผ่าน
+- Card Presence: ผ่าน
+- ATR: ผ่าน
+- CardInserted: ผ่าน
+- CardRemoved: ผ่าน
+- Hardware Test: ผ่าน 1 Test
+- ATR used for verification: `3B-79-96-00-00-54-48-20-4E-49-44-20-31-33`
 
-- Thai ID card data APDU protocol and real card data parsing.
-- Production public-key certificate validation workflow beyond configuration boundary.
+Hardware API verified through the local API on `http://127.0.0.1:18442`:
 
-## Blocked by external dependency
+- `GET /api/v1/readers`: returned `isConnected=true`, `isCardPresent=true`, and the ATR above.
+- `GET /api/v1/card/status`: returned `CardPresent` and the ATR above.
+- `POST /api/v1/card/atr`: returned the ATR above.
 
-- Verified Thai ID card protocol provider and real smart card hardware validation.
+## Not Implemented Or Blocked
 
-## Security limitations
+- อ่าน Citizen ID
+- อ่านชื่อ
+- อ่านวันเกิด
+- อ่านที่อยู่
+- อ่านรูปถ่าย
+- Thai Card APDU Provider
+- การเชื่อม Central Member API จริง
 
-- Integration tests use a configured symmetric JWT validation key. Production should validate with a public key while signing remains outside the agent.
-- Hardware tests return early unless `THAI_ID_AGENT_HARDWARE_TESTS=1` is set.
+No Citizen ID, owner name, address, birth date, or photo has been read or documented.
+
+## Security Limitations
+
+- Production deployments must configure public JWT verification material or authority configuration; private signing keys must not be stored in the agent.
+- Development key authentication is disabled outside Development environment.
+- The local API is designed for loopback binding only.

@@ -1,5 +1,25 @@
-# Next.js Integration
+﻿# Next.js Integration
 
-Use `examples/nextjs-client/thai-id-agent-client.ts` from client components or server actions that can obtain a short-lived token.
+Use `examples/nextjs-client/thai-id-agent-client.ts` from a client component or a browser-side helper that can obtain a short-lived credential.
 
-Do not store card data, tokens, or reader responses in `localStorage` or `sessionStorage`. Do not place card data in URLs. Clear React state when closing UI, logging out, starting a new read, or unmounting.
+The example supports:
+
+- `getAgentHealth()`
+- `getReaders(tokenOrDevelopmentKey)`
+- `getCardStatus(tokenOrDevelopmentKey, readerName?)`
+- `readCardAtr(tokenOrDevelopmentKey, readerName?)`
+- `readThaiIdCard(tokenOrDevelopmentKey, options, readerName?)`
+- `subscribeReaderEvents(tokenOrDevelopmentKey, handlers)`
+
+`tokenOrDevelopmentKey` can be a Development key or a JWT. A JWT-like string is sent as `Authorization: Bearer ...`; other strings are sent as `X-Agent-Development-Key`. For stricter code, pass `{ type: "bearerToken", value }` or `{ type: "developmentKey", value }`.
+
+Security rules for clients:
+
+- use `fetch` with `AbortController`
+- set request timeouts
+- do not use `localStorage` or `sessionStorage` for tokens or card data
+- do not place card data in URLs
+- do not log card data
+- clear React state on unmount, logout, new read, and modal close
+
+Current card-data reading is not supported. UI must not claim Citizen ID, names, address, birth date, or photo can be read until a verified provider is implemented.

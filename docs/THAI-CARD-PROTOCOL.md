@@ -1,7 +1,26 @@
-# Thai Card Protocol
+﻿# Thai Card Protocol
 
-Status: not configured.
+Thai card personal-data reading is not configured.
 
-This repository intentionally does not define Thai ID card APDU commands. Reader detection, card presence, ATR, console diagnostics, API endpoints, service hosting, and installer scripts can operate without Thai ID card data reading.
+`POST /api/v1/card/read` currently returns HTTP 501 with `THAI_CARD_PROTOCOL_NOT_CONFIGURED` through `IThaiIdCardReader` and `NotConfiguredThaiIdCardReader`.
 
-A future provider must supply verified protocol documentation or tested implementation evidence before `IThaiIdCardReader` is replaced.
+This repository intentionally does not include guessed APDU commands. A provider must be added only after the command set, data decoding rules, and usage rights are verified.
+
+Not implemented:
+
+- Citizen ID
+- Thai name
+- English name
+- birth date
+- issue/expiry dates
+- address
+- photo
+
+Implemented and tested separately:
+
+- reader detection
+- card presence
+- ATR retrieval
+- reader/card monitor events
+
+No document in this repository should contain a real Citizen ID or cardholder personal data.
