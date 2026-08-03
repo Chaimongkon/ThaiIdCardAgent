@@ -1,4 +1,4 @@
-namespace ThaiIdCardAgent.Core;
+﻿namespace ThaiIdCardAgent.Core;
 
 public static class AgentErrorMapper
 {
@@ -14,8 +14,11 @@ public static class AgentErrorMapper
             return new AgentError(AgentErrorCodes.Timeout, "Operation timed out.", includeTechnicalDetail ? exception.ToString() : null);
         }
 
-        return new AgentError(AgentErrorCodes.UnexpectedError, "Unexpected agent error.", includeTechnicalDetail ? exception.ToString() : null);
+        return new AgentError(AgentErrorCodes.InternalError, "Unexpected agent error.", includeTechnicalDetail ? exception.ToString() : null);
     }
 }
 
-public sealed record AgentErrorResponse(string RequestId, string Code, string Message, string? TechnicalDetail = null);
+public sealed record AgentErrorResponse(bool Success, object? Data, AgentError Error, string RequestId)
+{
+    public static AgentErrorResponse FromError(string requestId, AgentError error) => new(false, null, error, requestId);
+}

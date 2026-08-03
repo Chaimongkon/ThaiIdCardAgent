@@ -1,4 +1,4 @@
-namespace ThaiIdCardAgent.Core;
+﻿namespace ThaiIdCardAgent.Core;
 
 public sealed record SmartCardReaderInfo(
     string Name,
@@ -43,11 +43,11 @@ public enum ReaderEventType
     Error
 }
 
-public sealed record OperationResult<T>(bool Success, T? Data, AgentError? Error)
+public sealed record OperationResult<T>(bool Success, T? Data, AgentError? Error, string? RequestId = null)
 {
-    public static OperationResult<T> Ok(T data) => new(true, data, null);
+    public static OperationResult<T> Ok(T data, string? requestId = null) => new(true, data, null, requestId);
 
-    public static OperationResult<T> Fail(AgentError error) => new(false, default, error);
+    public static OperationResult<T> Fail(AgentError error, string? requestId = null) => new(false, default, error, requestId);
 }
 
 public sealed record AgentError(string Code, string Message, string? TechnicalDetail = null);

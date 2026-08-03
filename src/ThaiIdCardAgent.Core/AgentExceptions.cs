@@ -1,4 +1,4 @@
-namespace ThaiIdCardAgent.Core;
+﻿namespace ThaiIdCardAgent.Core;
 
 public abstract class AgentException : Exception
 {
@@ -28,6 +28,14 @@ public sealed class ReaderNotFoundException : AgentException
     }
 
     public string ReaderName { get; }
+}
+
+public sealed class ReaderSelectionRequiredException : AgentException
+{
+    public ReaderSelectionRequiredException()
+        : base("Reader selection is required because multiple smart card readers are available.", AgentErrorCodes.ReaderSelectionRequired)
+    {
+    }
 }
 
 public sealed class CardNotPresentException : AgentException
@@ -66,7 +74,7 @@ public sealed class SmartCardBusyException : AgentException
 public sealed class SmartCardCommunicationException : AgentException
 {
     public SmartCardCommunicationException(string message, Exception? innerException = null)
-        : base(message, AgentErrorCodes.SmartCardCommunicationError, innerException)
+        : base(message, AgentErrorCodes.ReaderUnavailable, innerException)
     {
     }
 }
@@ -74,22 +82,25 @@ public sealed class SmartCardCommunicationException : AgentException
 public sealed class ThaiCardProtocolNotConfiguredException : AgentException
 {
     public ThaiCardProtocolNotConfiguredException()
-        : base("Thai ID card protocol provider is not configured.", AgentErrorCodes.ThaiCardProtocolNotConfigured)
+        : base("ยังไม่ได้กำหนด Provider สำหรับอ่านข้อมูลบัตรประชาชนไทย", AgentErrorCodes.ThaiCardProtocolNotConfigured)
     {
     }
 }
 
 public static class AgentErrorCodes
 {
-    public const string SmartCardServiceUnavailable = "SMART_CARD_SERVICE_UNAVAILABLE";
-    public const string ReaderNotFound = "READER_NOT_FOUND";
-    public const string CardNotPresent = "CARD_NOT_PRESENT";
-    public const string CardRemoved = "CARD_REMOVED";
-    public const string AgentBusy = "AGENT_BUSY";
-    public const string SmartCardCommunicationError = "SMART_CARD_COMMUNICATION_ERROR";
-    public const string ThaiCardProtocolNotConfigured = "THAI_CARD_PROTOCOL_NOT_CONFIGURED";
+    public const string InvalidRequest = "INVALID_REQUEST";
     public const string Unauthorized = "UNAUTHORIZED";
+    public const string Forbidden = "FORBIDDEN";
+    public const string ReaderNotFound = "READER_NOT_FOUND";
+    public const string AgentBusy = "AGENT_BUSY";
+    public const string CardRemoved = "CARD_REMOVED";
+    public const string CardNotPresent = "CARD_NOT_PRESENT";
+    public const string ReaderSelectionRequired = "READER_SELECTION_REQUIRED";
+    public const string SmartCardServiceUnavailable = "SMART_CARD_SERVICE_UNAVAILABLE";
+    public const string ReaderUnavailable = "READER_UNAVAILABLE";
     public const string Timeout = "TIMEOUT";
+    public const string ThaiCardProtocolNotConfigured = "THAI_CARD_PROTOCOL_NOT_CONFIGURED";
     public const string InvalidConfiguration = "INVALID_CONFIGURATION";
-    public const string UnexpectedError = "UNEXPECTED_ERROR";
+    public const string InternalError = "INTERNAL_ERROR";
 }

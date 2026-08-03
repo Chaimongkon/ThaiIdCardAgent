@@ -1,4 +1,4 @@
-using ThaiIdCardAgent.Core;
+﻿using ThaiIdCardAgent.Core;
 
 namespace ThaiIdCardAgent.Pcsc;
 
@@ -28,16 +28,6 @@ public static class PcscStateMapper
             return SmartCardPresenceStatus.ReaderUnavailable;
         }
 
-        if (HasFlag(eventState, PcscState.Mute))
-        {
-            return SmartCardPresenceStatus.CardMute;
-        }
-
-        if (HasFlag(eventState, PcscState.Unpowered))
-        {
-            return SmartCardPresenceStatus.CardUnpowered;
-        }
-
         if (HasFlag(eventState, PcscState.Present))
         {
             return SmartCardPresenceStatus.CardPresent;
@@ -46,6 +36,15 @@ public static class PcscStateMapper
         if (HasFlag(eventState, PcscState.Empty))
         {
             return SmartCardPresenceStatus.NoCard;
+        }
+        if (HasFlag(eventState, PcscState.Mute))
+        {
+            return SmartCardPresenceStatus.CardMute;
+        }
+
+        if (HasFlag(eventState, PcscState.Unpowered))
+        {
+            return SmartCardPresenceStatus.CardUnpowered;
         }
 
         return SmartCardPresenceStatus.Unknown;

@@ -3,18 +3,20 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using ThaiIdCardAgent.Core;
 using ThaiIdCardAgent.Pcsc;
 using ThaiIdCardAgent.ThaiCard;
-using Microsoft.Extensions.Hosting.WindowsServices;
 
 var builder = WebApplication.CreateBuilder(args);
 var isWindowsService = WindowsServiceHelpers.IsWindowsService();
@@ -43,7 +45,8 @@ builder.Services.AddSingleton<IThaiIdCardReader, NotConfiguredThaiIdCardReader>(
 builder.Services.AddPcscSmartCardServices();
 builder.Services.AddSingleton<IConfigureOptions<AgentSecurityOptions>, AgentSecurityOptionsSetup>();
 builder.Services.AddOptions<AgentSecurityOptions>()
-    .Validate(options => options.AllowedOrigins.All(origin => !origin.Contains('*', StringComparison.Ordinal)), "CORS origins must be exact and cannot contain wildcard characters.")
+    .Validate(options => options.AllowedOrigins.All(origin => !string.IsNullOrWhiteSpace(origin) && !origin.Contains('*', StringComparison.Ordinal)), "CORS origins must be exact and cannot contain wildcard characters.")
+    .Validate(options => options.Jwt.Audience == "thai-id-card-agent", "JWT audience must be thai-id-card-agent.")
     .ValidateOnStart();
 builder.Services.AddCors(options =>
 {
@@ -56,6 +59,10 @@ builder.Services.AddCors(options =>
 builder.Services.AddAuthentication(AgentAuthenticationHandler.SchemeName)
     .AddScheme<AuthenticationSchemeOptions, AgentAuthenticationHandler>(AgentAuthenticationHandler.SchemeName, _ => { });
 builder.Services.AddAuthorization();
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -81,7 +88,7 @@ app.UseExceptionHandler(errorApp =>
         var includeDetail = app.Environment.IsDevelopment();
         var error = AgentErrorMapper.FromException(exception, includeDetail);
         context.Response.StatusCode = ToStatusCode(error.Code);
-        await context.Response.WriteAsJsonAsync(new AgentErrorResponse(context.TraceIdentifier, error.Code, error.Message, error.TechnicalDetail), context.RequestAborted).ConfigureAwait(false);
+        await WriteErrorAsync(context, error).ConfigureAwait(false);
     });
 });
 
@@ -94,40 +101,58 @@ api.MapGet("/health", () => Results.Ok(new
 {
     status = "healthy",
     service = "ThaiIdCardAgent",
-    checkedAtUtc = DateTimeOffset.UtcNow
+    version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
+    utcTime = DateTimeOffset.UtcNow
 })).AllowAnonymous();
-api.MapGet("/info", () => Results.Ok(new
+api.MapGet("/info", (HttpContext context) => Results.Ok(OperationResult<object>.Ok(new
 {
     service = "Thai ID Card Local Agent",
     version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
     thaiCardProtocol = "not_configured"
-})).RequireAuthorization();
-api.MapGet("/readers", async (ISmartCardReaderService service, CancellationToken cancellationToken) =>
-    Results.Ok(OperationResult<IReadOnlyList<SmartCardReaderInfo>>.Ok(await service.GetReadersAsync(cancellationToken).ConfigureAwait(false)))).RequireAuthorization();
-api.MapGet("/card/status", async ([FromQuery] string? readerName, ISmartCardReaderService service, CancellationToken cancellationToken) =>
+}, context.TraceIdentifier))).RequireAuthorization();
+api.MapGet("/readers", async (HttpContext context, ISmartCardReaderService service, CancellationToken cancellationToken) =>
+    Results.Ok(OperationResult<IReadOnlyList<SmartCardReaderInfo>>.Ok(await service.GetReadersAsync(cancellationToken).ConfigureAwait(false), context.TraceIdentifier))).RequireAuthorization();
+api.MapGet("/card/status", async (HttpContext context, [FromQuery] string? readerName, ISmartCardReaderService service, CancellationToken cancellationToken) =>
 {
     var resolvedReader = await ResolveReaderAsync(service, readerName, cancellationToken).ConfigureAwait(false);
     var status = await service.GetStatusAsync(resolvedReader, cancellationToken).ConfigureAwait(false);
-    return Results.Ok(OperationResult<SmartCardStatus>.Ok(status));
+    return Results.Ok(OperationResult<SmartCardStatus>.Ok(status, context.TraceIdentifier));
 }).RequireAuthorization();
-api.MapPost("/card/atr", async ([FromBody] ReaderRequest request, ISmartCardReaderService service, CancellationToken cancellationToken) =>
+api.MapPost("/card/atr", async (HttpContext context, [FromBody] ReaderRequest? request, ISmartCardReaderService service, CancellationToken cancellationToken) =>
 {
-    var resolvedReader = await ResolveReaderAsync(service, request.ReaderName, cancellationToken).ConfigureAwait(false);
+    var resolvedReader = await ResolveReaderAsync(service, request?.ReaderName, cancellationToken).ConfigureAwait(false);
     var atr = await service.GetAtrAsync(resolvedReader, cancellationToken).ConfigureAwait(false);
-    return Results.Ok(OperationResult<CardAtrResponse>.Ok(new CardAtrResponse(resolvedReader, AtrFormatter.ToHex(atr), DateTimeOffset.UtcNow)));
+    return Results.Ok(OperationResult<CardAtrResponse>.Ok(new CardAtrResponse(resolvedReader, AtrFormatter.ToHex(atr), DateTimeOffset.UtcNow), context.TraceIdentifier));
 }).RequireAuthorization();
-api.MapPost("/card/read", (HttpContext context) => Results.Json(
-    new AgentErrorResponse(context.TraceIdentifier, AgentErrorCodes.ThaiCardProtocolNotConfigured, "Thai ID card protocol provider is not configured."),
-    statusCode: StatusCodes.Status501NotImplemented)).RequireAuthorization();
+api.MapPost("/card/read", async (HttpContext context, [FromBody] ThaiCardReadRequest? request, IThaiIdCardReader thaiIdCardReader, ISmartCardReaderService service, CancellationToken cancellationToken) =>
+{
+    var resolvedReader = await ResolveReaderAsync(service, request?.ReaderName, cancellationToken).ConfigureAwait(false);
+    var data = await thaiIdCardReader.ReadAsync(resolvedReader, request?.Options ?? new ThaiIdCardReadOptions(), cancellationToken).ConfigureAwait(false);
+    return Results.Ok(OperationResult<ThaiIdCardData>.Ok(data, context.TraceIdentifier));
+}).RequireAuthorization();
 api.MapGet("/events", async (HttpContext context, ISmartCardMonitor monitor) =>
 {
     context.Response.Headers.ContentType = "text/event-stream";
     await using (monitor.ConfigureAwait(false))
     {
-        void OnReaderEvent(object? _, ReaderEvent readerEvent)
+        async void OnReaderEvent(object? _, ReaderEvent readerEvent)
         {
-            var line = $"event: {readerEvent.EventType}\ndata: {System.Text.Json.JsonSerializer.Serialize(readerEvent)}\n\n";
-            context.Response.WriteAsync(line, context.RequestAborted).GetAwaiter().GetResult();
+            try
+            {
+                var safeEvent = new ReaderEventDto(
+                    readerEvent.EventType.ToString(),
+                    readerEvent.ReaderName,
+                    readerEvent.IsCardPresent,
+                    readerEvent.EventType is ReaderEventType.CardRemoved ? null : readerEvent.Atr,
+                    readerEvent.OccurredAtUtc);
+                var data = JsonSerializer.Serialize(safeEvent);
+                await context.Response.WriteAsync($"event: {safeEvent.EventType}\n", context.RequestAborted).ConfigureAwait(false);
+                await context.Response.WriteAsync($"data: {data}\n\n", context.RequestAborted).ConfigureAwait(false);
+                await context.Response.Body.FlushAsync(context.RequestAborted).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+            }
         }
 
         monitor.ReaderEventReceived += OnReaderEvent;
@@ -157,25 +182,43 @@ static async Task<string> ResolveReaderAsync(ISmartCardReaderService service, st
     }
 
     var readers = await service.GetReadersAsync(cancellationToken).ConfigureAwait(false);
-    return readers.FirstOrDefault()?.Name ?? throw new ReaderNotFoundException("<default>");
+    return readers.Count switch
+    {
+        0 => throw new ReaderNotFoundException("<default>"),
+        1 => readers[0].Name,
+        _ => throw new ReaderSelectionRequiredException()
+    };
+}
+
+static Task WriteErrorAsync(HttpContext context, AgentError error)
+{
+    return context.Response.WriteAsJsonAsync(AgentErrorResponse.FromError(context.TraceIdentifier, error), context.RequestAborted);
 }
 
 static int ToStatusCode(string code) => code switch
 {
-    AgentErrorCodes.ReaderNotFound => StatusCodes.Status404NotFound,
-    AgentErrorCodes.CardNotPresent => StatusCodes.Status409Conflict,
-    AgentErrorCodes.CardRemoved => StatusCodes.Status409Conflict,
-    AgentErrorCodes.AgentBusy => StatusCodes.Status423Locked,
-    AgentErrorCodes.SmartCardServiceUnavailable => StatusCodes.Status503ServiceUnavailable,
-    AgentErrorCodes.ThaiCardProtocolNotConfigured => StatusCodes.Status501NotImplemented,
-    AgentErrorCodes.Timeout => StatusCodes.Status408RequestTimeout,
+    AgentErrorCodes.InvalidRequest => StatusCodes.Status400BadRequest,
     AgentErrorCodes.Unauthorized => StatusCodes.Status401Unauthorized,
+    AgentErrorCodes.Forbidden => StatusCodes.Status403Forbidden,
+    AgentErrorCodes.ReaderNotFound => StatusCodes.Status404NotFound,
+    AgentErrorCodes.AgentBusy => StatusCodes.Status409Conflict,
+    AgentErrorCodes.CardRemoved => StatusCodes.Status409Conflict,
+    AgentErrorCodes.CardNotPresent => StatusCodes.Status422UnprocessableEntity,
+    AgentErrorCodes.ReaderSelectionRequired => StatusCodes.Status422UnprocessableEntity,
+    AgentErrorCodes.SmartCardServiceUnavailable => StatusCodes.Status503ServiceUnavailable,
+    AgentErrorCodes.ReaderUnavailable => StatusCodes.Status503ServiceUnavailable,
+    AgentErrorCodes.Timeout => StatusCodes.Status504GatewayTimeout,
+    AgentErrorCodes.ThaiCardProtocolNotConfigured => StatusCodes.Status501NotImplemented,
     _ => StatusCodes.Status500InternalServerError
 };
 
-public sealed record ReaderRequest(string? ReaderName);
+public sealed record ReaderRequest(string? ReaderName, string? RequestId = null);
+
+public sealed record ThaiCardReadRequest(string? ReaderName, ThaiIdCardReadOptions? Options, string? RequestId = null);
 
 public sealed record CardAtrResponse(string ReaderName, string Atr, DateTimeOffset ReadAtUtc);
+
+public sealed record ReaderEventDto(string EventType, string ReaderName, bool? CardPresent, string? Atr, DateTimeOffset OccurredAtUtc);
 
 public sealed class AgentSecurityOptions
 {
@@ -189,6 +232,8 @@ public sealed class JwtOptions
     public string Issuer { get; set; } = "thai-id-card-agent-client";
 
     public string Audience { get; set; } = "thai-id-card-agent";
+
+    public string? PublicKeyPem { get; set; }
 
     public string? SymmetricSigningKey { get; set; }
 }
@@ -205,6 +250,8 @@ public sealed class AgentSecurityOptionsSetup : IConfigureOptions<AgentSecurityO
     public void Configure(AgentSecurityOptions options)
     {
         _configuration.GetSection("Agent").Bind(options);
+        _configuration.GetSection("Security:Jwt").Bind(options.Jwt);
+        options.Jwt.PublicKeyPem ??= Environment.GetEnvironmentVariable("Security__Jwt__PublicKeyPem");
         options.Jwt.SymmetricSigningKey ??= Environment.GetEnvironmentVariable("THAI_ID_AGENT_JWT_SIGNING_KEY");
     }
 }
@@ -244,9 +291,24 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
         return Task.FromResult(AuthenticateJwt());
     }
 
+    protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
+    {
+        Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await Response.WriteAsJsonAsync(AgentErrorResponse.FromError(Context.TraceIdentifier, new AgentError(AgentErrorCodes.Unauthorized, "Authentication is required.")), Context.RequestAborted).ConfigureAwait(false);
+    }
+
+    protected override async Task HandleForbiddenAsync(AuthenticationProperties properties)
+    {
+        Response.StatusCode = StatusCodes.Status403Forbidden;
+        await Response.WriteAsJsonAsync(AgentErrorResponse.FromError(Context.TraceIdentifier, new AgentError(AgentErrorCodes.Forbidden, "Access is forbidden.")), Context.RequestAborted).ConfigureAwait(false);
+    }
+
     private AuthenticateResult AuthenticateDevelopment()
     {
-        var expected = _configuration["Agent:DevelopmentKey"] ?? Environment.GetEnvironmentVariable("THAI_ID_AGENT_DEV_KEY");
+        var expected = _configuration["Security:DevelopmentApiKey"]
+            ?? _configuration["Agent:DevelopmentKey"]
+            ?? Environment.GetEnvironmentVariable("Security__DevelopmentApiKey")
+            ?? Environment.GetEnvironmentVariable("THAI_ID_AGENT_DEV_KEY");
         if (string.IsNullOrWhiteSpace(expected))
         {
             return AuthenticateResult.Fail("Development key is not configured.");
@@ -270,7 +332,8 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
 
         var token = header["Bearer ".Length..].Trim();
         var options = _securityOptions.CurrentValue;
-        if (string.IsNullOrWhiteSpace(options.Jwt.SymmetricSigningKey))
+        var signingKey = CreateValidationKey(options.Jwt);
+        if (signingKey is null)
         {
             return AuthenticateResult.Fail("JWT validation key is not configured.");
         }
@@ -285,8 +348,9 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
                 ValidateAudience = true,
                 ValidAudience = options.Jwt.Audience,
                 ValidateIssuerSigningKey = true,
-                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(options.Jwt.SymmetricSigningKey)),
+                IssuerSigningKey = signingKey,
                 RequireExpirationTime = true,
+                RequireSignedTokens = true,
                 ValidateLifetime = true,
                 ClockSkew = TimeSpan.Zero
             }, out var validatedToken);
@@ -312,10 +376,24 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
             _cache.Set($"jti:{jti}", true, new DateTimeOffset(jwt.ValidTo, TimeSpan.Zero));
             return AuthenticateResult.Success(CreateTicket(subject, workstationId, "jwt"));
         }
-        catch (Exception exception) when (exception is SecurityTokenException or ArgumentException)
+        catch (Exception exception) when (exception is SecurityTokenException or ArgumentException or CryptographicException)
         {
             return AuthenticateResult.Fail("JWT validation failed.");
         }
+    }
+
+    private static SecurityKey? CreateValidationKey(JwtOptions options)
+    {
+        if (!string.IsNullOrWhiteSpace(options.PublicKeyPem))
+        {
+            var rsa = RSA.Create();
+            rsa.ImportFromPem(options.PublicKeyPem);
+            return new RsaSecurityKey(rsa);
+        }
+
+        return string.IsNullOrWhiteSpace(options.SymmetricSigningKey)
+            ? null
+            : new SymmetricSecurityKey(Encoding.UTF8.GetBytes(options.SymmetricSigningKey));
     }
 
     private AuthenticationTicket CreateTicket(string subject, string workstationId, string authenticationType)
@@ -331,7 +409,7 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
     {
         var leftBytes = Encoding.UTF8.GetBytes(left);
         var rightBytes = Encoding.UTF8.GetBytes(right);
-        return CryptographicOperations.FixedTimeEquals(leftBytes, rightBytes);
+        return leftBytes.Length == rightBytes.Length && CryptographicOperations.FixedTimeEquals(leftBytes, rightBytes);
     }
 }
 
