@@ -63,7 +63,8 @@ BenchmarkDotNet.Artifacts/
 # .NET
 project.lock.json
 project.fragment.lock.json
-artifacts/
+artifacts/*
+!artifacts/.gitkeep
 
 # Tye
 .tye/
@@ -480,3 +481,6 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+**/artifacts/*
+!artifacts/.gitkeep

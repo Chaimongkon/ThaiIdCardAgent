@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ThaiIdCardAgent.Core\ThaiIdCardAgent.Core.csproj" />
+    <ProjectReference Include="..\ThaiIdCardAgent.Pcsc\ThaiIdCardAgent.Pcsc.csproj" />
+    <ProjectReference Include="..\ThaiIdCardAgent.ThaiCard\ThaiIdCardAgent.ThaiCard.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\ThaiIdCardAgent.Core\ThaiIdCardAgent.Core.csproj" />
+  </ItemGroup>
+</Project>

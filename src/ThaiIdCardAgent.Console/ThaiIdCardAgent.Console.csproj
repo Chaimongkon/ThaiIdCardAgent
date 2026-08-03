@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ThaiIdCardAgent.Core\ThaiIdCardAgent.Core.csproj" />
+    <ProjectReference Include="..\ThaiIdCardAgent.Pcsc\ThaiIdCardAgent.Pcsc.csproj" />
+    <ProjectReference Include="..\ThaiIdCardAgent.ThaiCard\ThaiIdCardAgent.ThaiCard.csproj" />
+  </ItemGroup>
+</Project>
