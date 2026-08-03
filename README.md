@@ -1,4 +1,4 @@
-﻿# ThaiIdCardAgent
+# ThaiIdCardAgent
 
 ThaiIdCardAgent is a local Windows loopback agent for PC/SC smart card readers. It exposes an authenticated ASP.NET Core Minimal API for authorized web applications and keeps browser code away from USB/PCSC access.
 
@@ -31,7 +31,7 @@ dotnet build -c Release
 dotnet test -c Release --filter "Category!=Hardware"
 ```
 
-On this machine, SDK 10.0.302 can fail solution-level `dotnet clean/build/test` in the parallel project graph with `0 Warning(s), 0 Error(s)`. When that happens, rerun the same command with `-m:1`.
+Inside the Codex managed sandbox, SDK 10.0.302 can fail solution-level `dotnet clean/build/test` in the parallel project graph with `0 Warning(s), 0 Error(s)`. The standard commands pass on the host outside that sandbox. See `docs/BUILD-TROUBLESHOOTING.md` before using `-m:1` as a workaround.
 
 ## Run Console
 
@@ -60,6 +60,12 @@ Invoke-RestMethod -Uri "http://127.0.0.1:18442/api/v1/readers" -Headers @{ "X-Ag
 ```
 
 Production binds HTTPS loopback `https://127.0.0.1:18443`; HTTP is Development-only.
+
+Run production diagnostics without opening a listener:
+
+```powershell
+.\ThaiIdCardAgent.Service.exe --diagnostics
+```
 
 ## Endpoints
 

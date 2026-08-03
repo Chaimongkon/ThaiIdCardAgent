@@ -67,9 +67,19 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.WebHost.ConfigureKestrel(options =>
 {
     var enableDevelopmentHttps = builder.Configuration.GetValue("Agent:EnableHttpsInDevelopment", false);
-    if (!builder.Environment.IsDevelopment() || enableDevelopmentHttps)
+    if (builder.Environment.IsDevelopment() && enableDevelopmentHttps)
     {
         options.ListenLocalhost(18443, listenOptions => listenOptions.UseHttps());
+    }
+    else if (!builder.Environment.IsDevelopment())
+    {
+        var certificate = AgentDiagnostics.FindConfiguredCertificate(builder.Configuration);
+        if (certificate is null)
+        {
+            throw new InvalidOperationException("Production HTTPS certificate is not configured or cannot be found.");
+        }
+
+        options.ListenLocalhost(18443, listenOptions => listenOptions.UseHttps(certificate));
     }
 
     if (builder.Environment.IsDevelopment())
@@ -77,6 +87,11 @@ builder.WebHost.ConfigureKestrel(options =>
         options.ListenLocalhost(18442);
     }
 });
+
+if (args.Any(argument => string.Equals(argument, "--diagnostics", StringComparison.OrdinalIgnoreCase)))
+{
+    return await AgentDiagnostics.RunAsync(builder.Configuration, builder.Environment, CancellationToken.None).ConfigureAwait(false);
+}
 
 var app = builder.Build();
 
@@ -173,6 +188,7 @@ api.MapGet("/events", async (HttpContext context, ISmartCardMonitor monitor) =>
 }).RequireAuthorization();
 
 app.Run();
+return 0;
 
 static async Task<string> ResolveReaderAsync(ISmartCardReaderService service, string? readerName, CancellationToken cancellationToken)
 {
@@ -236,6 +252,17 @@ public sealed class JwtOptions
     public string? PublicKeyPem { get; set; }
 
     public string? SymmetricSigningKey { get; set; }
+}
+
+public sealed class HttpsCertificateOptions
+{
+    public string StoreName { get; set; } = "My";
+
+    public string StoreLocation { get; set; } = "LocalMachine";
+
+    public string? Thumbprint { get; set; }
+
+    public string? SubjectName { get; set; } = "localhost";
 }
 
 public sealed class AgentSecurityOptionsSetup : IConfigureOptions<AgentSecurityOptions>
