@@ -94,7 +94,7 @@ Not tested:
 - `CardRemoved` over `/api/v1/events`.
 - `CardInserted` over `/api/v1/events`.
 
-These must remain reported as `Not Tested` until separately verified with an SSE client.
+`scripts\Test-SseEvents.ps1` is available for this check. These must remain reported as `Not Tested` until the script passes against the installed Windows Service and real hardware.
 
 ## 10. Installer, Upgrade, And Uninstall Status
 

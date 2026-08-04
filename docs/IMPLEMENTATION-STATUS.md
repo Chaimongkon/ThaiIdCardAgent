@@ -62,6 +62,7 @@ Production Acceptance passed on the test machine:
 
 - SSE `CardRemoved` through `/api/v1/events`.
 - SSE `CardInserted` through `/api/v1/events`.
+- SSE hardware acceptance script `scripts\Test-SseEvents.ps1` has not yet passed against the installed Windows Service.
 - Windows restart and Automatic Delayed Start after reboot.
 - Code signing of executable/installer.
 

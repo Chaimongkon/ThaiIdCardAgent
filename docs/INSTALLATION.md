@@ -58,8 +58,8 @@ Validated through the installed Windows Service:
 
 Still not tested:
 
-- SSE `CardRemoved` through `/api/v1/events`.
-- SSE `CardInserted` through `/api/v1/events`.
+- SSE `CardRemoved` through `/api/v1/events`. Run `scripts\Test-SseEvents.ps1` separately after Production Acceptance.
+- SSE `CardInserted` through `/api/v1/events`. Run `scripts\Test-SseEvents.ps1` separately after Production Acceptance.
 - Windows restart and Automatic Delayed Start after reboot.
 
 Executable/installer code signing is not implemented yet; published binaries are unsigned.
@@ -78,6 +78,17 @@ Run from an elevated PowerShell session on the target workstation:
 ```
 
 Use test signing material only for acceptance. Do not store JWTs, private keys, PFX/P12 files, passwords, or cardholder data in Git, docs, screenshots, logs, or tickets.
+
+Run SSE acceptance separately after the service is installed and running:
+
+```powershell
+.\scripts\Test-SseEvents.ps1 `
+    -BaseUrl "https://localhost:18443" `
+    -JwtPublicKeyPath "<public-verification-key-path>" `
+    -JwtPrivateKeyPath "<test-private-signing-key-path>"
+```
+
+This opens `/api/v1/events`, prompts for card removal and insertion, waits up to 30 seconds per event, and does not bypass certificate validation or print JWTs.
 
 Uninstall as Administrator:
 

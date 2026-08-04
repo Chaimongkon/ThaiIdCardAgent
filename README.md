@@ -32,7 +32,7 @@ Validated through the installed service:
 
 Still not tested:
 
-- SSE `CardRemoved` and `CardInserted` through `/api/v1/events`.
+- SSE `CardRemoved` and `CardInserted` through `/api/v1/events` (use `scripts\Test-SseEvents.ps1`; hardware/service run still pending).
 - Windows restart and Automatic Delayed Start after reboot.
 - Code signing. Published binaries are currently unsigned.
 
@@ -106,6 +106,7 @@ Run production diagnostics without opening a listener:
 .\scripts\Install-Service.ps1 -WhatIf
 .\scripts\Set-CertificatePrivateKeyAcl.ps1 -Thumbprint "<thumbprint>" -Account "NT AUTHORITY\LOCAL SERVICE" -WhatIf
 .\scripts\Test-ProductionAcceptance.ps1 -WhatIf -CertificateThumbprint "<thumbprint>"
+.\scripts\Test-SseEvents.ps1 -BaseUrl "https://localhost:18443"
 .\scripts\Uninstall-Service.ps1 -WhatIf
 ```
 

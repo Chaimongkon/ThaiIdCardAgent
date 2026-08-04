@@ -77,7 +77,7 @@ Not tested:
 - `CardRemoved` over `GET /api/v1/events`.
 - `CardInserted` over `GET /api/v1/events`.
 
-SSE must be tested separately from status polling before claiming event-stream acceptance.
+SSE must be tested separately from status polling before claiming event-stream acceptance. Use `scripts\Test-SseEvents.ps1` against the installed Windows Service and real hardware.
 
 ## Build, Test, Publish
 

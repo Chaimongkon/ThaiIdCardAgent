@@ -258,6 +258,37 @@ public sealed class ScriptValidationTests
         Assert.Contains("Status polling is not SSE validation", script, StringComparison.Ordinal);
     }
     [Fact]
+    public void SseEventsScript_UsesHttpsJwtAndDoesNotBypassCertificateValidation()
+    {
+        var script = ReadScript("scripts", "Test-SseEvents.ps1");
+
+        Assert.StartsWith("#requires -Version 5.1", script, StringComparison.Ordinal);
+        Assert.Contains("https://localhost:18443", script, StringComparison.Ordinal);
+        Assert.Contains("/api/v1/events", script, StringComparison.Ordinal);
+        Assert.Contains("New-TestJwt.ps1", script, StringComparison.Ordinal);
+        Assert.Contains("-LifetimeSeconds", script, StringComparison.Ordinal);
+        Assert.Contains("'60'", script, StringComparison.Ordinal);
+        Assert.Contains("Authorization", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("SkipCertificate", script, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ServerCertificateValidationCallback", script, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Bearer $token\" |", script, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SseEventsScript_ValidatesExpectedEventsAndSafeAtr()
+    {
+        var script = ReadScript("scripts", "Test-SseEvents.ps1");
+
+        Assert.Contains("Wait-SseEvent -Connection $connection -ExpectedEventType 'CardRemoved'", script, StringComparison.Ordinal);
+        Assert.Contains("Wait-SseEvent -Connection $connection -ExpectedEventType 'CardInserted'", script, StringComparison.Ordinal);
+        Assert.Contains("[int]$TimeoutSeconds = 30", script, StringComparison.Ordinal);
+        Assert.Contains("readerName was missing", script, StringComparison.Ordinal);
+        Assert.Contains("eventType was missing", script, StringComparison.Ordinal);
+        Assert.Contains("occurredAtUtc was invalid", script, StringComparison.Ordinal);
+        Assert.Contains("^([0-9A-F]{2})(-[0-9A-F]{2})*$", script, StringComparison.Ordinal);
+        Assert.Contains("Repeated connect/disconnect", script, StringComparison.Ordinal);
+    }
+    [Fact]
     public void PowerShellScripts_DeclareWindowsPowerShell51Compatibility()
     {
         foreach (var scriptPath in GetPowerShellScripts())
