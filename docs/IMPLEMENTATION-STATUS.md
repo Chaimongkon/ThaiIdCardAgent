@@ -10,20 +10,22 @@
 - Development key authentication from configuration/user secrets/environment.
 - Production JWT validation with issuer, audience, lifetime, required claims, and replay detection.
 - Acceptance tooling that issues a fresh JWT for every Production API request.
+- Authenticated SSE `/api/v1/events` with disconnect cleanup.
 - Exact-origin CORS.
 - Windows Service hosting configuration.
 - Publish/install/uninstall/certificate scripts with `-WhatIf` support where applicable.
-- Next.js TypeScript client and example component.
 - Production `--diagnostics` command that checks configuration without opening a listener.
+- Runnable Next.js integration example with server-side JWT broker, typed Agent client, fetch-streaming SSE, and UI tests.
 
 ## Tested Without Hardware
 
 - `dotnet clean -m:1 /nr:false`: passed.
 - `dotnet restore -m:1 /nr:false`: passed.
-- `dotnet build -c Release -m:1 /nr:false --no-restore`: passed with `0 Warning(s), 0 Error(s)`.
-- `dotnet test -c Release -m:1 /nr:false --no-build --filter "Category!=Hardware"`: passed.
-- win-x64 publish produced `artifacts\publish\win-x64\ThaiIdCardAgent.Service.exe`.
+- `dotnet build -c Release -m:1 /nr:false --no-restore`: passed with `0 Warning(s), 0 Error(s)` in the previous verification run.
+- `dotnet test -c Release -m:1 /nr:false --no-build --filter "Category!=Hardware"`: passed with 87/87 in the previous verification run.
+- win-x64 publish produced `artifacts\publish\win-x64\ThaiIdCardAgent.Service.exe` in the previous verification run.
 - PowerShell scripts parse under Windows PowerShell 5.1.
+- Next.js example: lint, typecheck, unit tests, and production build passed locally after Phase 10 implementation.
 
 ## Tested With Hardware
 
@@ -52,7 +54,11 @@ Production Acceptance passed on the test machine:
 - Card ATR API through service: passed.
 - CardRemoved through status polling: passed after `NoCard` appeared 2 consecutive times.
 - CardInserted through status polling: passed after `CardPresent` appeared 2 consecutive times.
+- SSE CardRemoved through `/api/v1/events`: passed under Windows Service with real hardware.
+- SSE CardInserted through `/api/v1/events`: passed under Windows Service with real hardware.
+- SSE disconnect and reconnect repeated rounds: passed.
 - Restart service health/readers: passed.
+- Windows reboot and Automatic Delayed Start: passed.
 - Upgrade: passed.
 - Uninstall preserving config/logs: passed.
 - Reinstall: passed.
@@ -60,11 +66,8 @@ Production Acceptance passed on the test machine:
 
 ## Not Tested
 
-- SSE `CardRemoved` through `/api/v1/events`.
-- SSE `CardInserted` through `/api/v1/events`.
-- SSE hardware acceptance script `scripts\Test-SseEvents.ps1` has not yet passed against the installed Windows Service.
-- Windows restart and Automatic Delayed Start after reboot.
-- Code signing of executable/installer.
+- Phase 10 browser manual acceptance of the new `examples/nextjs-client` UI against the installed Windows Service and real hardware.
+- Code signing validation because executable/installer are still unsigned.
 
 ## Not Implemented
 
@@ -75,10 +78,11 @@ Production Acceptance passed on the test machine:
 - Photo reading.
 - Thai Card APDU provider.
 - Real Central Member API integration.
+- Authenticode signing of executable/installer.
 
 ## Security Limitations
 
-- Production deployments must configure public JWT verification material or authority configuration.
+- Production deployments must configure public JWT verification material and exact allowed origins.
 - Private signing keys, JWTs, passwords, PFX/P12 files, and machine-specific secrets must not be stored in Git or logs.
 - Development key authentication is disabled outside Development environment.
 - The local API is designed for loopback binding only.

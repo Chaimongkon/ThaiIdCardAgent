@@ -5,6 +5,8 @@
 
 # dotenv files
 .env
+.env.local
+.env*.local
 
 # User-specific files
 *.rsuser
@@ -493,3 +495,5 @@ artifacts/test-secrets/
 *.jwt
 artifacts/*.cer
 *.pfx
+**/.next/
+*.tsbuildinfo

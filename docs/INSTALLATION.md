@@ -50,17 +50,14 @@ Validated through the installed Windows Service:
 - PC/SC reader access under `NT AUTHORITY\LocalService`.
 - CardRemoved via `/api/v1/card/status` polling until `NoCard` was observed 2 consecutive times.
 - CardInserted via `/api/v1/card/status` polling until `CardPresent` was observed 2 consecutive times.
+- SSE `CardRemoved` and `CardInserted` through `/api/v1/events` with real hardware.
+- SSE disconnect and reconnect repeated rounds.
 - Restart service health/readers.
+- Windows reboot and Automatic Delayed Start.
 - Upgrade.
 - Uninstall while keeping config/logs.
 - Reinstall.
 - Certificate retention.
-
-Still not tested:
-
-- SSE `CardRemoved` through `/api/v1/events`. Run `scripts\Test-SseEvents.ps1` separately after Production Acceptance.
-- SSE `CardInserted` through `/api/v1/events`. Run `scripts\Test-SseEvents.ps1` separately after Production Acceptance.
-- Windows restart and Automatic Delayed Start after reboot.
 
 Executable/installer code signing is not implemented yet; published binaries are unsigned.
 
@@ -79,7 +76,7 @@ Run from an elevated PowerShell session on the target workstation:
 
 Use test signing material only for acceptance. Do not store JWTs, private keys, PFX/P12 files, passwords, or cardholder data in Git, docs, screenshots, logs, or tickets.
 
-Run SSE acceptance separately after the service is installed and running:
+Run SSE acceptance separately when validating event streaming:
 
 ```powershell
 .\scripts\Test-SseEvents.ps1 `
@@ -89,6 +86,19 @@ Run SSE acceptance separately after the service is installed and running:
 ```
 
 This opens `/api/v1/events`, prompts for card removal and insertion, waits up to 30 seconds per event, and does not bypass certificate validation or print JWTs.
+
+## Web Integration Example
+
+The example in `examples\nextjs-client` demonstrates a secure browser integration through a server-side JWT broker. Configure only placeholder-based `.env.local` values on the Next.js server and keep the private signing key out of browser bundles and Git.
+
+```powershell
+cd ".\examples\nextjs-client"
+npm ci
+copy .env.example .env.local
+npm run dev
+```
+
+Manual browser acceptance of the web example is still required for Phase 10 commit.
 
 Uninstall as Administrator:
 
