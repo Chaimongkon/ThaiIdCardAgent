@@ -1,3 +1,4 @@
+#requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true)]
@@ -49,6 +50,7 @@ try {
         throw 'Private key file path could not be resolved for this certificate provider.'
     }
 
+    $aclChanged = $false
     if ($PSCmdlet.ShouldProcess($keyPath, "Grant read access to $Account")) {
         $acl = Get-Acl -LiteralPath $keyPath
         $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
@@ -66,11 +68,17 @@ try {
         }
 
         Set-Acl -LiteralPath $keyPath -AclObject $acl
+        $aclChanged = $true
     }
 
     Write-Host "Certificate thumbprint: $($cert.Thumbprint)"
     Write-Host "Private key path: $keyPath"
-    Write-Host "Granted account: $Account"
+    if ($aclChanged) {
+        Write-Host "Granted account: $Account"
+    }
+    else {
+        Write-Host "Target account: $Account"
+    }
 }
 finally {
     $store.Dispose()

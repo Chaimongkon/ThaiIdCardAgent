@@ -1,3 +1,4 @@
+#requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$ServiceName = 'ThaiIdCardAgent',
@@ -102,20 +103,57 @@ else {
     Add-Result 'Production configuration' 'Not Tested' 'Use -ConfigureMachineEnvironment to set non-secret machine environment values for the service.'
 }
 
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Set-CertificatePrivateKeyAcl.ps1') `
-    -Thumbprint $CertificateThumbprint `
-    -Account (if ($ServiceAccount -eq 'NT AUTHORITY\LocalService') { 'NT AUTHORITY\LOCAL SERVICE' } else { $ServiceAccount }) `
-    -WhatIf:$WhatIfPreference | Out-Host
+$privateKeyAclAccount = if ($ServiceAccount -eq 'NT AUTHORITY\LocalService') {
+    'NT AUTHORITY\LOCAL SERVICE'
+}
+else {
+    $ServiceAccount
+}
+
+$privateKeyAclArgs = @(
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    (Join-Path $root 'scripts\Set-CertificatePrivateKeyAcl.ps1'),
+    '-Thumbprint',
+    $CertificateThumbprint,
+    '-Account',
+    $privateKeyAclAccount
+)
+if ($WhatIfPreference) {
+    $privateKeyAclArgs += '-WhatIf'
+}
+& powershell.exe @privateKeyAclArgs | Out-Host
+if ($LASTEXITCODE -ne 0) { throw 'Set-CertificatePrivateKeyAcl.ps1 failed.' }
 Add-Result 'LocalService private-key ACL' 'Passed' 'ACL script completed or WhatIf-reviewed.'
 
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Install-Service.ps1') `
-    -ServiceName $ServiceName `
-    -CertificateThumbprint $CertificateThumbprint `
-    -CertificateHostName $CertificateHostName `
-    -ServiceAccount $ServiceAccount `
-    -SkipStart `
-    -WhatIf:$WhatIfPreference | Out-Host
-Add-Result 'Install service' (if ($WhatIfPreference) { 'Not Tested' } else { 'Passed' })
+$installServiceStatus = if ($WhatIfPreference) {
+    Write-Host "What if: Would run Install-Service.ps1 for service '$ServiceName'."
+    'Not Tested'
+}
+else {
+    $installServiceArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        (Join-Path $root 'scripts\Install-Service.ps1'),
+        '-ServiceName',
+        $ServiceName,
+        '-CertificateThumbprint',
+        $CertificateThumbprint,
+        '-CertificateHostName',
+        $CertificateHostName,
+        '-ServiceAccount',
+        $ServiceAccount,
+        '-SkipStart'
+    )
+    & powershell.exe @installServiceArgs | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Install-Service.ps1 failed.' }
+    'Passed'
+}
+Add-Result 'Install service' $installServiceStatus
 
 if (-not $WhatIfPreference) {
     $service = Get-Service -Name $ServiceName -ErrorAction Stop

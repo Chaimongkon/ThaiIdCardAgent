@@ -1,3 +1,4 @@
+#requires -Version 5.1
 param([string]$BaseUrl = 'https://localhost:18443')
 
 Set-StrictMode -Version Latest
