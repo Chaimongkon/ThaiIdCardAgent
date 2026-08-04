@@ -1,142 +1,106 @@
-# Phase 8 Controlled Production Simulation
+# Phase 8/9 Production Simulation And Acceptance
 
-Date: 2026-08-03
+Date: 2026-08-04
 Repository: `D:\1.FrontEnd Framework\ThaiIdCardAgent`
 Branch: `main`
-Scope: Controlled Production Simulation for HTTPS, JWT, CORS, Windows Service readiness, and hardware/API behavior.
+Scope: controlled Production simulation, TLS root-cause validation, Windows Service acceptance, and service-account PC/SC behavior.
 
 ## Result
 
-Recommendation: **No-Go for unattended Production rollout**.
+Recommendation: **Go for controlled pilot on the tested workstation configuration only**.
 
-Production diagnostics passed for certificate, JWT public key path, CORS configuration, SCardSvr, and PC/SC reader detection. The final published service started and listened on `https://localhost:18443`, but HTTPS client handshakes from .NET `HttpClient`, Windows PowerShell, and `curl.exe` failed with Schannel `SEC_E_NO_CREDENTIALS`. Therefore runtime HTTPS/JWT/CORS/API verification through the final published service is not marked as passed.
+Production Acceptance was run on a real Windows test machine as Administrator. The installed Windows Service `ThaiIdCardAgent` ran under `NT AUTHORITY\LocalService` and successfully served HTTPS, JWT-authenticated APIs, PC/SC reader detection, card status, ATR, and card removal/insertion validation through status polling.
 
-Real Windows Service installation and LocalService hardware access were not run because the current session is not elevated Administrator and the service is not installed.
+This does not complete every production-readiness item. SSE card-change events, Windows restart/Automatic Delayed Start after reboot, and code signing remain not tested or incomplete.
 
-## HTTPS/TLS
+## TLS Root Cause And Resolution
 
-Configured certificate:
+Root cause proven during Phase 9:
 
-- Store: `LocalMachine\My`
-- Thumbprint: `79A7A07FDF6BC7EEBD3BC6F113659B79537A7101`
-- Subject/issuer: `CN=localhost`
-- SAN: `localhost`
-- EKU: Server Authentication
-- Private key: present and usable by the current console process
-- Chain: trusted by the current machine
+- The HTTPS server certificate was installed in `Cert:\LocalMachine\My`.
+- The public certificate was trusted only in `CurrentUser\Root` at first.
+- `LocalMachine\Root` did not contain the public certificate, so machine-context Schannel validation failed.
+- After importing the public certificate into `Cert:\LocalMachine\Root`, `certutil`, `curl.exe`, and `Invoke-WebRequest` succeeded without certificate-validation bypass.
 
-Observed behavior:
+Current validated behavior:
 
-- Published service listened on `https://localhost:18443`.
-- Kestrel bound loopback `127.0.0.1:18443` and `[::1]:18443`.
-- Production diagnostics returned pass for SAN `localhost`, private key usability, and chain trust.
-- .NET `HttpClient` probe failed before HTTP response with `SEC_E_NO_CREDENTIALS`.
-- Windows PowerShell and `curl.exe` show the same Schannel failure on this host.
-- No `-SkipCertificateCheck` and no custom certificate callback were used.
-- `https://127.0.0.1:18443` is not a valid production target for the current certificate because the certificate does not contain IP SAN `127.0.0.1`.
+- Production HTTPS binds loopback on `https://localhost:18443`.
+- `GET /api/v1/health` returns HTTP 200 through the installed service.
+- No `-k`, `--insecure`, custom callback, or certificate-validation bypass was used.
+- Server TLS uses `ClientCertificateMode.NoCertificate`; mTLS is not required.
 
-Implementation change: Production startup now fails fast if the configured certificate is missing, expired/not-yet-valid, missing a usable private key, missing Server Authentication EKU, or missing SAN/host match for `localhost`.
+## Windows Service Acceptance
 
-## JWT
+Validated on the test machine:
 
-Code and tests now support public verification key material from a PEM path via `Agent:Jwt:PublicKeyPath`, `Security:Jwt:PublicKeyPath`, `Agent__Jwt__PublicKeyPath`, or `Security__Jwt__PublicKeyPath`.
+- Service name: `ThaiIdCardAgent`.
+- Service account: `NT AUTHORITY\LocalService`.
+- Service status: Running during acceptance.
+- Install: passed.
+- Service configuration: passed.
+- Start service: passed.
+- Restart service and health/readers recheck: passed.
+- Upgrade: passed.
+- Uninstall while keeping config/logs: passed.
+- Reinstall: passed.
+- Certificate retention: passed. Scripts did not delete certificates.
 
-Validated by integration tests and the test-token generator:
+## JWT And HTTPS APIs
 
-- Valid short-lived JWT from a public key path is accepted in service integration tests.
-- Expired JWT is rejected.
-- Wrong audience is rejected.
-- Missing `jti`, `sub`, or `workstation_id` is rejected.
-- Replay of the same `jti` is rejected.
-- Lifetime greater than 60 seconds is rejected by the runtime handler and test generator requires `-AllowInvalidLifetime` to create such a negative-test token.
+Validated through the installed Windows Service:
 
-Runtime JWT over HTTPS was not re-verified in the final published build because the TLS client handshake failed first.
+- JWT key preflight: passed.
+- JWT runtime issue: passed.
+- HTTPS health: passed without certificate-validation bypass.
+- Readers API: passed.
+- Card status API: passed.
+- Card ATR API: passed.
 
-No token or private key is stored in Git or printed by `scripts\New-TestJwt.ps1`.
+No JWT, private key, password, PFX/P12, or signing secret is documented here or committed to the repository.
 
-## CORS
+## PC/SC And Card Transitions
 
-Configured allowed origin for simulation: `https://localhost:3000`.
+Validated under `NT AUTHORITY\LocalService` through the service API:
 
-Validated by tests:
+- PC/SC reader access from the Windows Service account: passed.
+- Card status while card removed: `connected=True`, `cardPresent=False`, no ATR.
+- Card status after reinsertion: `connected=True`, `cardPresent=True`, ATR present.
+- CardRemoved transition: passed by polling `/api/v1/card/status` until `NoCard` was observed 2 consecutive times.
+- CardInserted transition: passed by polling `/api/v1/card/status` until `CardPresent` was observed 2 consecutive times.
 
-- Allowed origin returns `Access-Control-Allow-Origin`.
-- Unknown origin does not return the allow-origin header.
-- Wildcards remain rejected by options validation.
+The status endpoint reads the current PC/SC reader state on each request. Status polling success does not prove SSE event delivery.
 
-Runtime CORS over HTTPS was not re-verified in the final published build because the TLS client handshake failed first.
+## SSE Status
 
-## API And Hardware
+Not tested:
 
-Console CLI hardware checks with a real reader/card returned:
+- `CardRemoved` over `GET /api/v1/events`.
+- `CardInserted` over `GET /api/v1/events`.
 
-- `readers`: reader count `1`, `Connected: True`, `Card present: True`, ATR `3B-79-96-00-00-54-48-20-4E-49-44-20-31-33`.
-- `status`: `connected=True`, `cardPresent=True`, same ATR.
-- `atr`: same ATR.
+SSE must be tested separately from status polling before claiming event-stream acceptance.
 
-Runtime API calls through HTTPS were blocked by the TLS client handshake failure in the final published build.
+## Build, Test, Publish
 
-No Thai ID APDU implementation was added. No Citizen ID, name, address, birth date, or photo was read.
-
-## Windows Service
-
-Status in this session:
-
-- Current process is not Administrator.
-- `ThaiIdCardAgent` Windows Service is not installed.
-- Real install: **blocked**.
-- Real upgrade: **not tested**.
-- Real uninstall: **not tested**.
-- Service recovery action verification: **not tested**.
-- Restart Windows auto-start verification: **not tested**.
-- LocalService PC/SC access: **not tested**.
-- Monitor `CardInserted`/`CardRemoved` through the installed service: **not tested**.
-
-Administrator commands for the target machine:
-
-```powershell
-.\scripts\Publish-WinX64.ps1
-.\scripts\Set-CertificatePrivateKeyAcl.ps1 -Thumbprint "79A7A07FDF6BC7EEBD3BC6F113659B79537A7101" -Account "NT AUTHORITY\LOCAL SERVICE" -RemoveBroadReadGroups
-.\scripts\Install-Service.ps1 -HealthUri "https://localhost:18443/api/v1/health"
-Get-Service ThaiIdCardAgent
-sc.exe qc ThaiIdCardAgent
-sc.exe qfailure ThaiIdCardAgent
-```
-
-## Private Key ACL
-
-The current certificate private key file exists and is usable by the current console process, but its ACL includes broad read principals (`Everyone` / `BUILTIN\Users`) and LocalService-specific access was not proven in this non-admin session.
-
-Required before Production rollout:
-
-- Grant private key read access to `NT AUTHORITY\LOCAL SERVICE` or the configured service account.
-- Remove broad read grants that are not operationally required.
-- Re-run service diagnostics and HTTPS health from the installed service.
-
-## Build And Tests
-
-The exact `dotnet clean` solution-level command failed in this Codex-managed environment with `0 Warning(s), 0 Error(s)` after cleaning the tool project. The same pipeline passed with single-node MSBuild and node reuse disabled:
+Required verification command set:
 
 ```powershell
 dotnet clean -m:1 /nr:false
 dotnet restore -m:1 /nr:false
 dotnet build -c Release -m:1 /nr:false --no-restore
 dotnet test -c Release -m:1 /nr:false --no-build --filter "Category!=Hardware"
+.\scripts\Publish-WinX64.ps1
 ```
 
-Final non-hardware test result: 52 passed, 0 failed.
+The latest run for this documentation update is recorded in the final task report.
 
-## Code Signing
+## Remaining Not Tested Or Incomplete
 
-The published executable is currently unsigned. Production distribution should add Authenticode signing before rollout.
+- SSE `CardRemoved` through `/api/v1/events`.
+- SSE `CardInserted` through `/api/v1/events`.
+- Windows restart and Automatic Delayed Start after reboot.
+- Authenticode/code signing for executable or installer.
+- Thai ID APDU/data reading. No Citizen ID, name, address, birth date, or photo has been read.
 
-## Open Items
+## Rollout Notes
 
-- Resolve Schannel `SEC_E_NO_CREDENTIALS` for local HTTPS clients without bypassing certificate validation.
-- Run real Windows Service install as Administrator.
-- Verify HTTPS/JWT/CORS through the installed Windows Service.
-- Verify PC/SC reader/card/ATR under `NT AUTHORITY\LOCAL SERVICE`.
-- Verify monitor `CardInserted` and `CardRemoved` by physically removing/inserting the card while the monitor is running.
-- Verify service restart, Windows restart, upgrade, and uninstall.
-- Replace test JWT issuer with the real production issuer/key management process.
-- Add code signing.
+Use this acceptance result only for the tested workstation class and configuration. Repeat acceptance on each target image or deployment baseline, especially where PC/SC driver, certificate trust, Windows service policy, or endpoint security differs.

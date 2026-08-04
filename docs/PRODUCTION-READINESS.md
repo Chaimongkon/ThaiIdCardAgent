@@ -1,168 +1,130 @@
 # Production Readiness
 
-Review date: 2026-08-03
+Review date: 2026-08-04
 Branch: `main`
-Scope: Phase 7 production readiness review for ThaiIdCardAgent. Phase 8 simulation details are in `docs/PRODUCTION-SIMULATION.md`.
+Scope: Production readiness after real Windows Service Production Acceptance on the test machine.
 
 ## 1. Executive Summary
 
-The repository builds and tests successfully on the host when commands are run outside the Codex managed sandbox. The smart card reader, card presence, ATR, and local Development API were previously verified with real hardware. Phase 7 added a non-listening `--diagnostics` command and hardened the install script for upgrade/reinstall behavior.
+Production Acceptance passed on the test machine for the installed Windows Service running as `NT AUTHORITY\LocalService`. HTTPS, JWT, reader enumeration, card status, ATR, PC/SC access from the service account, CardRemoved, CardInserted, restart, upgrade, uninstall-keep-data, reinstall, and certificate retention were validated.
 
-Current recommendation: **No-Go for unattended Production rollout** until Production configuration is supplied and Windows Service installation is tested from an elevated administrator session.
+Current recommendation: **Go for controlled pilot on the validated workstation configuration**. Do not claim full enterprise rollout readiness until SSE events, Windows reboot auto-start, and code signing are completed.
 
 ## 2. Build Status
 
-Tested outside the Codex sandbox:
+Required build pipeline passed in the latest verification run:
 
-- `dotnet clean`: passed.
-- `dotnet restore`: passed.
-- `dotnet build -c Release`: passed with `0 Warning(s), 0 Error(s)`.
+```powershell
+dotnet clean -m:1 /nr:false
+dotnet restore -m:1 /nr:false
+dotnet build -c Release -m:1 /nr:false --no-restore
+```
 
-Inside the Codex sandbox, default parallel solution graph commands can fail with no logged errors. See `docs/BUILD-TROUBLESHOOTING.md`.
+The Release build completed with `0 Warning(s), 0 Error(s)`.
 
 ## 3. Test Status
 
-Final Phase 7 verification passed:
+Non-hardware tests passed in the latest verification run:
 
-- Core tests: 3 passed.
-- PCSC tests: 18 passed.
-- Service tests: 24 passed.
-- Hardware tests: 1 passed with `THAI_ID_AGENT_HARDWARE_TESTS=1`.
-- Total: 46 passed, 0 failed, 0 skipped.
+- Core tests: passed.
+- PCSC tests: passed.
+- Service tests: passed.
+- Hardware test assembly was excluded by `--filter "Category!=Hardware"`.
 
-## 4. Hardware Status
+The latest count is recorded in the final task report.
 
-Tested in Console with real hardware on 2026-08-03:
+## 4. Hardware And PC/SC Status
+
+Validated with real hardware:
 
 - Reader detection: passed.
-- Card presence: passed.
-- ATR: passed.
-- CardInserted/CardRemoved: previously passed with real card transition.
+- Card absent state: passed.
+- Card present state: passed.
+- ATR through Console and Service API: passed.
+- PC/SC access under Windows Service account `NT AUTHORITY\LocalService`: passed.
 
-No personal cardholder data has been read.
+No personal cardholder data has been read or documented.
 
-## 5. Local API Status
+## 5. HTTPS Status
 
-Tested over HTTP Development on `http://127.0.0.1:18442`:
+Production HTTPS is loopback-only on `https://localhost:18443`.
+
+Validated:
+
+- `GET /api/v1/health`: HTTP 200 through installed service.
+- Certificate validation: no bypass used.
+- Server mTLS: not required; `ClientCertificateMode.NoCertificate`.
+- Root cause of previous TLS failure: machine-level certificate trust mismatch between `CurrentUser\Root` and `LocalMachine\Root`.
+
+## 6. JWT Status
+
+Validated:
+
+- JWT key preflight: passed.
+- Short-lived JWT runtime issue: passed.
+- Replay protection is respected by issuing a fresh JWT for each acceptance API request.
+- The acceptance script does not print JWTs.
+
+Private signing keys, JWTs, passwords, and PFX/P12 files must remain outside Git and out of logs.
+
+## 7. API Status Through Windows Service
+
+Validated through the installed service:
 
 - `GET /api/v1/health`: passed.
-- `GET /api/v1/readers`: passed with authentication.
-- `GET /api/v1/card/status`: passed with authentication.
-- `POST /api/v1/card/atr`: passed with authentication.
-- `POST /api/v1/card/read`: returns `501 THAI_CARD_PROTOCOL_NOT_CONFIGURED`.
+- `GET /api/v1/readers`: passed.
+- `GET /api/v1/card/status`: passed.
+- `POST /api/v1/card/atr`: passed.
 
-## 6. Windows Service Status
+`POST /api/v1/card/read` remains intentionally not implemented and returns protocol-not-configured behavior until a verified Thai card APDU provider is added.
 
-Not installed in this Phase 7 run because the current process is not Administrator. Dry run is supported through:
+## 8. Card Transition Status
 
-```powershell
-.\scripts\Install-Service.ps1 -WhatIf
-```
+Validated through status polling:
 
-The install script now supports upgrade/reinstall by stopping an existing service before copy, preserving config/log data, and updating service configuration.
+- CardRemoved: passed after `/api/v1/card/status` returned `NoCard` 2 consecutive times.
+- CardInserted: passed after `/api/v1/card/status` returned `CardPresent` 2 consecutive times.
 
-## 7. HTTPS Status
+Status polling is not SSE validation.
 
-Production HTTPS binding is loopback-only on `https://localhost:18443`; the certificate must match the host name used by clients.
+## 9. SSE Status
 
-Production diagnostics found an HTTPS certificate in the LocalMachine store with:
+Not tested:
 
-- trusted chain: passed.
-- private key visible to current process: passed.
-- SAN matches localhost: passed for the current certificate. IP address `127.0.0.1` is not covered unless an IP SAN is added.
+- `CardRemoved` over `/api/v1/events`.
+- `CardInserted` over `/api/v1/events`.
 
-Console-mode Production HTTPS was attempted from the published executable. The process listened on `https://localhost:18443`, and HTTP `18442` was not available, but PowerShell and `curl.exe` failed the TLS handshake without bypassing certificate validation. `curl.exe` reported `SEC_E_NO_CREDENTIALS (0x8009030e)`. This is not marked as passed.
+These must remain reported as `Not Tested` until separately verified with an SSE client.
 
-## 8. Certificate Status
+## 10. Installer, Upgrade, And Uninstall Status
 
-Configured lookup defaults:
+Validated on the test machine:
 
-- Store: `LocalMachine\My`.
-- SubjectName: `localhost`.
+- Install Windows Service: passed.
+- Service configuration: passed.
+- Start service: passed.
+- Restart service health/readers: passed.
+- Upgrade: passed.
+- Uninstall while preserving config/logs: passed.
+- Reinstall: passed.
+- Certificate retention: passed.
 
-No certificate password, private key PEM, or generated code-signing certificate is stored in the repository.
+The installer uses `NT AUTHORITY\LocalService` by default.
 
-## 9. JWT Status
+## 11. Remaining Risks
 
-Production diagnostics currently fail because no JWT public verification key is configured in this environment.
+- Windows restart and Automatic Delayed Start after reboot: not tested.
+- Code signing: executable/installer are unsigned.
+- SSE event-stream transitions: not tested.
+- Thai card APDU/data provider: not implemented.
+- Production rollout must provide managed JWT public verification material and exact allowed origins.
 
-Previously tested in service integration tests:
+## 12. Go Conditions For Wider Rollout
 
-- replay token rejected.
-- expired token rejected.
-- wrong audience rejected.
-- missing `jti`, `sub`, or `workstation_id` rejected.
+Before broad rollout:
 
-The agent must receive public verification material only. Private signing keys must stay outside the agent.
-
-## 10. CORS Status
-
-Development CORS origin is configured as `http://localhost:3000`.
-
-Production diagnostics currently fail because `Agent:AllowedOrigins` is empty. Production must configure exact origins only. Wildcards are rejected by options validation and tests.
-
-## 11. Installer Status
-
-Publish/install/uninstall scripts parse successfully. Install real execution is blocked by missing Administrator privileges in this session.
-
-The installer:
-
-- installs to `C:\Program Files\ThaiIdCardAgent`.
-- stores config/logs under `C:\ProgramData\ThaiIdCardAgent`.
-- grants service account access to ProgramData.
-- configures LocalService by default.
-- sets delayed automatic startup and recovery actions.
-
-## 12. Upgrade Status
-
-Upgrade logic is implemented but not tested against a real installed service in this session.
-
-Expected behavior:
-
-- stop existing service before copy.
-- preserve existing config/logs.
-- back up existing config when present.
-- update service binary path, display name, startup, account, description, and recovery actions.
-- health check after start unless `-SkipStart` is used.
-
-## 13. Uninstall Status
-
-Uninstall script removes the program folder and keeps ProgramData by default. `-RemoveData` deletes ProgramData only when explicitly requested. Certificates are not deleted automatically.
-
-Real uninstall was not run in this session.
-
-## 14. Service Account Status
-
-Default service account: `NT AUTHORITY\LocalService`.
-
-Service-account PC/SC access was not tested because the service was not installed. Console and diagnostics PC/SC checks ran under the current user account only.
-
-## 15. Known Risks
-
-- Production `Agent:AllowedOrigins` must be supplied by deployment.
-- Production JWT public key or authority configuration must be supplied by deployment.
-- LocalService access to the smart card stack must be verified on the target workstation.
-- HTTPS TLS handshake currently fails in console-mode Production test and must be resolved before rollout.
-- HTTPS must also be tested from the installed Windows Service after the console-mode TLS issue is resolved.
-- Code signing is not implemented; `ThaiIdCardAgent.Service.exe` is currently unsigned.
-- Thai card APDU/data provider is not implemented.
-
-## 16. Blocked Items
-
-- Real Windows Service install: blocked by non-Administrator process.
-- Service account hardware test: blocked until service is installed.
-- Restart Windows auto-start test: blocked until service is installed.
-- Installer upgrade/uninstall real tests: blocked until elevated service install is allowed.
-
-## 17. Go/No-Go Recommendation
-
-No-Go for Production rollout today.
-
-Go conditions:
-
-- Configure exact Production `Agent:AllowedOrigins`.
-- Configure JWT public verification material outside Git.
-- Install from an elevated administrator session.
-- Resolve the current TLS handshake failure, then verify HTTPS `GET /api/v1/health` over `https://localhost:18443` or a SAN-matching host without bypassing certificate validation.
-- Verify `/readers`, `/card/status`, and `/card/atr` through the installed service account with a real reader/card.
-- Verify install, upgrade, uninstall, and Windows restart behavior.
+- Verify SSE `CardRemoved` and `CardInserted` through `/api/v1/events`.
+- Verify service starts after Windows restart with Automatic Delayed Start.
+- Add Authenticode signing for executable/installer.
+- Repeat acceptance on target hardware/driver baselines.
+- Keep private keys, JWTs, passwords, and PFX/P12 files out of Git and logs.

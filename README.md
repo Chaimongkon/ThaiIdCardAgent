@@ -13,25 +13,47 @@ flowchart LR
     Thai --> NotConfigured[Protocol not configured]
 ```
 
+## Current Status
+
+Production Acceptance passed on the test machine with `ThaiIdCardAgent` installed as a Windows Service running under `NT AUTHORITY\LocalService`.
+
+Validated through the installed service:
+
+- HTTPS health on `https://localhost:18443` without certificate-validation bypass.
+- JWT authentication and short-lived test JWT issue.
+- Readers API.
+- Card status API.
+- Card ATR API.
+- PC/SC access under `NT AUTHORITY\LocalService`.
+- CardRemoved via status polling with 2 consecutive `NoCard` observations.
+- CardInserted via status polling with 2 consecutive `CardPresent` observations.
+- Restart service health/readers.
+- Upgrade, uninstall while keeping config/logs, reinstall, and certificate retention.
+
+Still not tested:
+
+- SSE `CardRemoved` and `CardInserted` through `/api/v1/events`.
+- Windows restart and Automatic Delayed Start after reboot.
+- Code signing. Published binaries are currently unsigned.
+
+Thai ID personal-data reading is not implemented. The agent has not read Citizen ID, name, address, birth date, or photo.
+
 ## Prerequisites
 
 - Windows x64
 - .NET SDK `10.0.302` or compatible .NET 10 SDK
 - Windows Smart Card Service
 - PC/SC-compatible smart card reader
+- Administrator rights for service install/acceptance
 
 ## Build And Test
 
 ```powershell
-Get-Location
-git status
-dotnet clean
-dotnet restore
-dotnet build -c Release
-dotnet test -c Release --filter "Category!=Hardware"
+dotnet clean -m:1 /nr:false
+dotnet restore -m:1 /nr:false
+dotnet build -c Release -m:1 /nr:false --no-restore
+dotnet test -c Release -m:1 /nr:false --no-build --filter "Category!=Hardware"
 ```
-
-Inside the Codex managed sandbox, SDK 10.0.302 can fail solution-level `dotnet clean/build/test` in the parallel project graph with `0 Warning(s), 0 Error(s)`. The standard commands pass on the host outside that sandbox. See `docs/BUILD-TROUBLESHOOTING.md` before using `-m:1` as a workaround.
 
 ## Run Console
 
@@ -59,7 +81,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:18442/api/v1/health"
 Invoke-RestMethod -Uri "http://127.0.0.1:18442/api/v1/readers" -Headers @{ "X-Agent-Development-Key" = "local-test-key" }
 ```
 
-Production binds HTTPS loopback `https://localhost:18443`; HTTP is Development-only. Use `localhost` unless the certificate also contains IP SAN `127.0.0.1`.
+Production binds HTTPS loopback on `https://localhost:18443`; HTTP is Development-only. Use `localhost` unless the certificate also contains IP SAN `127.0.0.1`.
 
 Run production diagnostics without opening a listener:
 
@@ -72,10 +94,10 @@ Run production diagnostics without opening a listener:
 - `GET /api/v1/health` anonymous health only, no reader/card data.
 - `GET /api/v1/info` authenticated agent metadata.
 - `GET /api/v1/readers` authenticated reader list.
-- `GET /api/v1/card/status?readerName=...` authenticated card status; auto-selects when one reader exists.
+- `GET /api/v1/card/status?readerName=...` authenticated current card status; auto-selects when one reader exists.
 - `POST /api/v1/card/atr` authenticated ATR read.
 - `POST /api/v1/card/read` authenticated, currently returns `THAI_CARD_PROTOCOL_NOT_CONFIGURED`.
-- `GET /api/v1/events` authenticated Server-Sent Events for reader/card changes.
+- `GET /api/v1/events` authenticated Server-Sent Events for reader/card changes. SSE card-change acceptance is still not tested.
 
 ## Publish And Service Scripts
 
@@ -83,16 +105,10 @@ Run production diagnostics without opening a listener:
 .\scripts\Publish-WinX64.ps1
 .\scripts\Install-Service.ps1 -WhatIf
 .\scripts\Set-CertificatePrivateKeyAcl.ps1 -Thumbprint "<thumbprint>" -Account "NT AUTHORITY\LOCAL SERVICE" -WhatIf
+.\scripts\Test-ProductionAcceptance.ps1 -WhatIf -CertificateThumbprint "<thumbprint>"
 .\scripts\Uninstall-Service.ps1 -WhatIf
 ```
 
-The install/uninstall scripts require Administrator rights. Do not install or alter the Windows Service without explicitly approving that action.
+The install/uninstall scripts require Administrator rights. Do not store JWTs, private keys, PFX/P12 files, passwords, or cardholder data in Git or logs.
 
-## Current Limits
-
-- Thai ID card APDU/data reading is not implemented.
-- The agent has not read Citizen ID, name, address, birth date, or photo.
-- A verified Thai card protocol provider is still required before enabling personal-data reads.
-
-
-See docs/PRODUCTION-SIMULATION.md for the Phase 8 controlled production simulation status and remaining no-go items.
+See `docs/PRODUCTION-SIMULATION.md`, `docs/PRODUCTION-READINESS.md`, and `docs/INSTALLATION.md` for the latest acceptance details and remaining items.

@@ -36,6 +36,49 @@ The install script:
 - starts the service and checks health
 - supports upgrade/reinstall by stopping an existing service before copying files
 
+## Production Acceptance
+
+Production Acceptance has passed on the test machine with the service running as `NT AUTHORITY\LocalService`.
+
+Validated through the installed Windows Service:
+
+- HTTPS health without certificate-validation bypass.
+- JWT runtime issue.
+- Readers API.
+- Card status API.
+- Card ATR API.
+- PC/SC reader access under `NT AUTHORITY\LocalService`.
+- CardRemoved via `/api/v1/card/status` polling until `NoCard` was observed 2 consecutive times.
+- CardInserted via `/api/v1/card/status` polling until `CardPresent` was observed 2 consecutive times.
+- Restart service health/readers.
+- Upgrade.
+- Uninstall while keeping config/logs.
+- Reinstall.
+- Certificate retention.
+
+Still not tested:
+
+- SSE `CardRemoved` through `/api/v1/events`.
+- SSE `CardInserted` through `/api/v1/events`.
+- Windows restart and Automatic Delayed Start after reboot.
+
+Executable/installer code signing is not implemented yet; published binaries are unsigned.
+
+## Acceptance Command
+
+Run from an elevated PowerShell session on the target workstation:
+
+```powershell
+.\scripts\Test-ProductionAcceptance.ps1 `
+    -CertificateThumbprint "<server-certificate-thumbprint>" `
+    -CertificateHostName "localhost" `
+    -BaseUrl "https://localhost:18443" `
+    -JwtPublicKeyPath "<public-verification-key-path>" `
+    -JwtPrivateKeyPath "<test-private-signing-key-path>"
+```
+
+Use test signing material only for acceptance. Do not store JWTs, private keys, PFX/P12 files, passwords, or cardholder data in Git, docs, screenshots, logs, or tickets.
+
 Uninstall as Administrator:
 
 ```powershell
@@ -45,6 +88,4 @@ Uninstall as Administrator:
 
 Uninstall removes only the agent program folder by default and keeps config/logs. Use `-RemoveData` only when config/log deletion is intended. Certificates are not deleted automatically.
 
-Do not report Windows Service installation as successful unless the install command was actually run and health check passed on the target machine.
-
-For a controlled upgrade where another step will start the service, use `-SkipStart`. Do not report a service-account hardware test as passed until the installed Windows Service answers the authenticated API calls with the real reader/card.
+For a controlled upgrade where another step will start the service, use `-SkipStart`.

@@ -9,6 +9,7 @@
 - Minimal API with authenticated local smart card endpoints.
 - Development key authentication from configuration/user secrets/environment.
 - Production JWT validation with issuer, audience, lifetime, required claims, and replay detection.
+- Acceptance tooling that issues a fresh JWT for every Production API request.
 - Exact-origin CORS.
 - Windows Service hosting configuration.
 - Publish/install/uninstall/certificate scripts with `-WhatIf` support where applicable.
@@ -17,63 +18,54 @@
 
 ## Tested Without Hardware
 
-- Standard `dotnet clean`, `dotnet restore`, and `dotnet build -c Release` passed outside the Codex sandbox.
-- Non-hardware tests passed: Core 3, PCSC 18, Service 24.
-- Integration coverage for health, auth failures, Development key, JWT failures, replay token, CORS, reader selection, missing reader, no card, ATR success, agent busy, protocol-not-configured, requestId, and production error redaction.
+- `dotnet clean -m:1 /nr:false`: passed.
+- `dotnet restore -m:1 /nr:false`: passed.
+- `dotnet build -c Release -m:1 /nr:false --no-restore`: passed with `0 Warning(s), 0 Error(s)`.
+- `dotnet test -c Release -m:1 /nr:false --no-build --filter "Category!=Hardware"`: passed.
 - win-x64 publish produced `artifacts\publish\win-x64\ThaiIdCardAgent.Service.exe`.
-- Published executable diagnostics ran without opening a listener.
-- Install/uninstall/certificate scripts were checked with `-WhatIf`; Windows Service was not installed in the Phase 7 run because the process was not Administrator.
+- PowerShell scripts parse under Windows PowerShell 5.1.
 
 ## Tested With Hardware
 
-Test date: 2026-08-03
+Validated with a real PC/SC reader/card on the test machine:
 
-- Reader: Identive SCR33xx v2.0 USB SC Reader 0
 - Reader detection: passed.
-- Card presence: passed.
+- Card absent state: passed.
+- Card present state: passed.
 - ATR: passed.
-- CardInserted: previously passed with real hardware transition.
-- CardRemoved: previously passed with real hardware transition.
-- Hardware test: passed 1 test with `THAI_ID_AGENT_HARDWARE_TESTS=1`.
-- ATR used for verification: `3B-79-96-00-00-54-48-20-4E-49-44-20-31-33`.
+- Console status while card removed: `connected=True`, `cardPresent=False`, no ATR.
+- Console status after reinsertion: `connected=True`, `cardPresent=True`, ATR present.
 
-Hardware API verified through the local API on `http://127.0.0.1:18442`:
+No Citizen ID, owner name, address, birth date, or photo has been read or documented.
 
-- `GET /api/v1/readers`: returned `isConnected=true`, `isCardPresent=true`, and the ATR above.
-- `GET /api/v1/card/status`: returned `CardPresent` and the ATR above.
-- `POST /api/v1/card/atr`: returned the ATR above.
+## Production Acceptance Through Windows Service
 
-## Phase 7 Production Readiness
+Production Acceptance passed on the test machine:
 
-Tested in Console:
+- Windows Service installed and running.
+- Service account: `NT AUTHORITY\LocalService`.
+- PC/SC under service account: passed.
+- HTTPS health without certificate-validation bypass: passed.
+- JWT key preflight and runtime issue: passed.
+- Readers API through service: passed.
+- Card status API through service: passed.
+- Card ATR API through service: passed.
+- CardRemoved through status polling: passed after `NoCard` appeared 2 consecutive times.
+- CardInserted through status polling: passed after `CardPresent` appeared 2 consecutive times.
+- Restart service health/readers: passed.
+- Upgrade: passed.
+- Uninstall preserving config/logs: passed.
+- Reinstall: passed.
+- Certificate retention: passed.
 
-- Final Phase 7 tests passed 46/46.
-- Development `--diagnostics` passed with one warning for missing JWT public key, which is expected in Development key mode.
-- Production `--diagnostics` found SCardSvr, one PC/SC reader, free port 18443, and a trusted loopback certificate.
+## Not Tested
 
-Tested over HTTP Development:
+- SSE `CardRemoved` through `/api/v1/events`.
+- SSE `CardInserted` through `/api/v1/events`.
+- Windows restart and Automatic Delayed Start after reboot.
+- Code signing of executable/installer.
 
-- Local API hardware endpoints previously passed on `http://127.0.0.1:18442`.
-
-Tested over HTTPS Production:
-
-- Certificate discovery diagnostics passed.
-- Published executable listened on `https://localhost:18443`, but TLS handshake failed from PowerShell and `curl.exe` without bypassing certificate validation. HTTPS is not marked passed.
-- Full HTTPS service health from an installed Windows Service has not been tested in this session.
-
-Tested as Windows Service:
-
-- Not tested in this session. Current process is not Administrator.
-- Dry-run scripts are available with `-WhatIf`.
-
-Blocked by External Dependency:
-
-- Production `Agent:AllowedOrigins` is not configured in this environment.
-- Production JWT public verification key is not configured in this environment.
-- Real install/upgrade/uninstall requires Administrator approval.
-- Service-account PC/SC access requires an installed Windows Service.
-
-## Not Implemented Or Blocked
+## Not Implemented
 
 - Citizen ID reading.
 - Cardholder name reading.
@@ -83,10 +75,10 @@ Blocked by External Dependency:
 - Thai Card APDU provider.
 - Real Central Member API integration.
 
-No Citizen ID, owner name, address, birth date, or photo has been read or documented.
-
 ## Security Limitations
 
-- Production deployments must configure public JWT verification material or authority configuration; private signing keys must not be stored in the agent.
+- Production deployments must configure public JWT verification material or authority configuration.
+- Private signing keys, JWTs, passwords, PFX/P12 files, and machine-specific secrets must not be stored in Git or logs.
 - Development key authentication is disabled outside Development environment.
 - The local API is designed for loopback binding only.
+- Executable/installer signing remains incomplete.
