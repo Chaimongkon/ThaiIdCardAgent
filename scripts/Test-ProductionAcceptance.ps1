@@ -88,6 +88,8 @@ function Add-NotTestedAfterJwtFailure {
     Add-Result 'Card ATR API' 'Not Tested' 'JWT issue failed.'
     Add-Result 'CardRemoved transition' 'Not Tested' 'JWT issue failed.'
     Add-Result 'CardInserted transition' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'SSE CardRemoved' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'SSE CardInserted' 'Not Tested' 'JWT issue failed.'
     Add-Result 'Restart service health/readers' 'Not Tested' 'JWT issue failed.'
     Add-Result 'Upgrade' 'Not Tested' 'JWT issue failed.'
     Add-Result 'Uninstall keep data' 'Not Tested' 'JWT issue failed.'
@@ -165,6 +167,46 @@ function Invoke-AgentJson {
 function Get-CardPresence {
     $status = Invoke-AgentJson -Method Get -Path '/api/v1/card/status' -TokenName 'status'
     return [string]$status.data.status
+}
+
+function Wait-ForCardStatus {
+    param(
+        [string]$ExpectedStatus,
+        [string]$ResultName,
+        [int]$TimeoutSeconds = 15,
+        [int]$PollMilliseconds = 500,
+        [int]$RequiredConsecutiveObservations = 2
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $consecutiveObservations = 0
+    $latestStatus = '<not observed>'
+
+    do {
+        try {
+            $latestStatus = Get-CardPresence
+        }
+        catch {
+            $latestStatus = "request failed: $($_.Exception.Message)"
+        }
+
+        if ($latestStatus -eq $ExpectedStatus) {
+            $consecutiveObservations++
+        }
+        else {
+            $consecutiveObservations = 0
+        }
+
+        if ($consecutiveObservations -ge $RequiredConsecutiveObservations) {
+            Add-Result $ResultName 'Passed' "Observed $ExpectedStatus $RequiredConsecutiveObservations consecutive times."
+            return
+        }
+
+        Start-Sleep -Milliseconds $PollMilliseconds
+    } while ((Get-Date) -lt $deadline)
+
+    Add-Result $ResultName 'Failed' "Timed out after ${TimeoutSeconds}s waiting for $ExpectedStatus. Latest status: $latestStatus."
+    Complete-Acceptance 1
 }
 
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -310,15 +352,13 @@ if (-not $WhatIfPreference) {
     }
     else {
         Read-Host 'Remove the card, then press Enter'
-        $removed = Get-CardPresence
-        if ($removed -ne 'NoCard') { throw "Expected NoCard after removal but got $removed." }
-        Add-Result 'CardRemoved transition' 'Passed'
+        Wait-ForCardStatus -ExpectedStatus 'NoCard' -ResultName 'CardRemoved transition'
 
         Read-Host 'Insert the card, then press Enter'
-        $inserted = Get-CardPresence
-        if ($inserted -ne 'CardPresent') { throw "Expected CardPresent after insertion but got $inserted." }
-        Add-Result 'CardInserted transition' 'Passed'
+        Wait-ForCardStatus -ExpectedStatus 'CardPresent' -ResultName 'CardInserted transition'
     }
+    Add-Result 'SSE CardRemoved' 'Not Tested' 'Status polling is not SSE validation. Test /api/v1/events separately.'
+    Add-Result 'SSE CardInserted' 'Not Tested' 'Status polling is not SSE validation. Test /api/v1/events separately.'
 
     Restart-Service -Name $ServiceName -Force
     Start-Sleep -Seconds 3
@@ -366,6 +406,8 @@ else {
     Add-Result 'Card ATR API' 'Not Tested' 'WhatIf mode.'
     Add-Result 'CardRemoved transition' 'Not Tested' 'WhatIf mode.'
     Add-Result 'CardInserted transition' 'Not Tested' 'WhatIf mode.'
+    Add-Result 'SSE CardRemoved' 'Not Tested' 'WhatIf mode.'
+    Add-Result 'SSE CardInserted' 'Not Tested' 'WhatIf mode.'
     Add-Result 'Restart service health/readers' 'Not Tested' 'WhatIf mode.'
     Add-Result 'Upgrade' 'Not Tested' 'WhatIf mode.'
     Add-Result 'Uninstall keep data' 'Not Tested' 'WhatIf mode.'

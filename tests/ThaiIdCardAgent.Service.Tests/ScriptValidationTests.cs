@@ -163,6 +163,101 @@ public sealed class ScriptValidationTests
     }
 
     [Fact]
+    public void ProductionAcceptanceScript_WaitsForDelayedRemovalUsingPolling()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+
+        Assert.Contains("function Wait-ForCardStatus", script, StringComparison.Ordinal);
+        Assert.Contains("[int]$PollMilliseconds = 500", script, StringComparison.Ordinal);
+        Assert.Contains("[int]$TimeoutSeconds = 15", script, StringComparison.Ordinal);
+
+        var promptIndex = script.IndexOf("Read-Host 'Remove the card, then press Enter'", StringComparison.Ordinal);
+        var waitIndex = script.IndexOf("Wait-ForCardStatus -ExpectedStatus 'NoCard' -ResultName 'CardRemoved transition'", StringComparison.Ordinal);
+
+        Assert.True(promptIndex >= 0, "Removal prompt was not found.");
+        Assert.True(waitIndex > promptIndex, "Removal must wait for NoCard after the operator prompt.");
+    }
+
+    [Fact]
+    public void ProductionAcceptanceScript_WaitsForDelayedInsertionUsingPolling()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+        var promptIndex = script.IndexOf("Read-Host 'Insert the card, then press Enter'", StringComparison.Ordinal);
+        var waitIndex = script.IndexOf("Wait-ForCardStatus -ExpectedStatus 'CardPresent' -ResultName 'CardInserted transition'", StringComparison.Ordinal);
+
+        Assert.True(promptIndex >= 0, "Insertion prompt was not found.");
+        Assert.True(waitIndex > promptIndex, "Insertion must wait for CardPresent after the operator prompt.");
+    }
+
+    [Fact]
+    public void ProductionAcceptanceScript_TimesOutWhenRemovalRemainsCardPresent()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+
+        Assert.Contains("Timed out after ${TimeoutSeconds}s waiting for $ExpectedStatus. Latest status: $latestStatus.", script, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForCardStatus -ExpectedStatus 'NoCard' -ResultName 'CardRemoved transition'", script, StringComparison.Ordinal);
+        Assert.Contains("Add-Result $ResultName 'Failed'", script, StringComparison.Ordinal);
+        Assert.Contains("Complete-Acceptance 1", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProductionAcceptanceScript_TimesOutWhenInsertionRemainsNoCard()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+
+        Assert.Contains("Timed out after ${TimeoutSeconds}s waiting for $ExpectedStatus. Latest status: $latestStatus.", script, StringComparison.Ordinal);
+        Assert.Contains("Wait-ForCardStatus -ExpectedStatus 'CardPresent' -ResultName 'CardInserted transition'", script, StringComparison.Ordinal);
+        Assert.Contains("Add-Result $ResultName 'Failed'", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("Expected CardPresent after insertion", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProductionAcceptanceScript_RequiresTwoConsecutiveCardStatusObservations()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+
+        Assert.Contains("[int]$RequiredConsecutiveObservations = 2", script, StringComparison.Ordinal);
+        Assert.Contains("$consecutiveObservations++", script, StringComparison.Ordinal);
+        Assert.Contains("$consecutiveObservations = 0", script, StringComparison.Ordinal);
+        Assert.Contains("$consecutiveObservations -ge $RequiredConsecutiveObservations", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProductionAcceptanceScript_UsesFreshJwtForEveryCardStatusPoll()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+
+        Assert.Contains("$status = Invoke-AgentJson -Method Get -Path '/api/v1/card/status' -TokenName 'status'", script, StringComparison.Ordinal);
+        Assert.Contains("$token = New-TestToken -TokenName $TokenName", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("cachedToken", script, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("$script:token", script, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProductionAcceptanceScript_TimeoutFailureDoesNotReportCardTransitionPassed()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+        var failureIndex = script.IndexOf("Add-Result $ResultName 'Failed'", StringComparison.Ordinal);
+        var exitIndex = script.IndexOf("Complete-Acceptance 1", failureIndex, StringComparison.Ordinal);
+        var oldRemovalPassed = "Add-Result 'CardRemoved transition' 'Passed'";
+        var oldInsertionPassed = "Add-Result 'CardInserted transition' 'Passed'";
+
+        Assert.True(failureIndex >= 0, "Wait timeout failure result was not found.");
+        Assert.True(exitIndex > failureIndex, "Wait timeout must return a non-zero exit after reporting Failed.");
+        Assert.DoesNotContain(oldRemovalPassed, script, StringComparison.Ordinal);
+        Assert.DoesNotContain(oldInsertionPassed, script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProductionAcceptanceScript_SeparatesSseValidationFromStatusPolling()
+    {
+        var script = ReadScript("scripts", "Test-ProductionAcceptance.ps1");
+
+        Assert.Contains("Add-Result 'SSE CardRemoved' 'Not Tested'", script, StringComparison.Ordinal);
+        Assert.Contains("Add-Result 'SSE CardInserted' 'Not Tested'", script, StringComparison.Ordinal);
+        Assert.Contains("Status polling is not SSE validation", script, StringComparison.Ordinal);
+    }
+    [Fact]
     public void PowerShellScripts_DeclareWindowsPowerShell51Compatibility()
     {
         foreach (var scriptPath in GetPowerShellScripts())
