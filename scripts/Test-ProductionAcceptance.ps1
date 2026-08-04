@@ -26,23 +26,123 @@ function Add-Result {
     Write-Host "[$Status] $Name $Message"
 }
 
+function Complete-Acceptance {
+    param([int]$ExitCode = 0)
+    Write-Host ''
+    Write-Host 'Production acceptance summary'
+    $script:results | Format-Table -AutoSize
+    exit $ExitCode
+}
+
 function Test-IsAdministrator {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($current)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-PlaceholderPath {
+    param([string]$Path)
+    return -not [string]::IsNullOrWhiteSpace($Path) -and $Path -match '<[^>]+>'
+}
+
+function Test-JwtKeyInput {
+    param(
+        [string]$Name,
+        [string]$Path,
+        [System.Collections.Generic.List[string]]$Failures
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        [void]$Failures.Add("$Name path is required.")
+        return
+    }
+
+    if (Test-PlaceholderPath -Path $Path) {
+        [void]$Failures.Add("$Name path contains placeholder text.")
+        return
+    }
+
+    $resolved = $null
+    try {
+        $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    }
+    catch {
+        [void]$Failures.Add("$Name path could not be resolved.")
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        [void]$Failures.Add("$Name file was not found.")
+        return
+    }
+
+    $item = Get-Item -LiteralPath $resolved
+    if ($item.Length -le 0) {
+        [void]$Failures.Add("$Name file is empty.")
+    }
+}
+
+function Add-NotTestedAfterJwtFailure {
+    Add-Result 'Readers API' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'Card status API' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'Card ATR API' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'CardRemoved transition' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'CardInserted transition' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'Restart service health/readers' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'Upgrade' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'Uninstall keep data' 'Not Tested' 'JWT issue failed.'
+    Add-Result 'Reinstall' 'Not Tested' 'JWT issue failed.'
+}
+
 function New-TestToken {
     param([string]$TokenName)
-    $tokenPath = Join-Path $env:TEMP "thai-id-agent-$TokenName.jwt"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:root 'scripts\New-TestJwt.ps1') `
-        -PrivateKeyPath $script:JwtPrivateKeyPath `
-        -PublicKeyPath $script:JwtPublicKeyPath `
-        -TokenOutputPath $tokenPath `
-        -LifetimeSeconds 60 `
-        -Force | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to create test JWT for $TokenName." }
-    return (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+
+    $tokenPath = Join-Path $env:TEMP ("thai-id-agent-{0}-{1}.jwt" -f $TokenName, [guid]::NewGuid().ToString('N'))
+    try {
+        $jwtArgs = @(
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            (Join-Path $script:root 'scripts\New-TestJwt.ps1'),
+            '-PrivateKeyPath',
+            $script:JwtPrivateKeyPath,
+            '-PublicKeyPath',
+            $script:JwtPublicKeyPath,
+            '-TokenOutputPath',
+            $tokenPath,
+            '-LifetimeSeconds',
+            '60',
+            '-Force'
+        )
+
+        $jwtToolOutput = & powershell.exe @jwtArgs 2>&1
+        $jwtExitCode = $LASTEXITCODE
+        if ($jwtExitCode -ne 0) {
+            throw "JWT tool failed with exit code $jwtExitCode."
+        }
+
+        if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
+            throw 'JWT tool did not create a token file.'
+        }
+
+        $tokenItem = Get-Item -LiteralPath $tokenPath
+        if ($tokenItem.Length -le 0) {
+            throw 'JWT token file is empty.'
+        }
+
+        $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            throw 'JWT token was empty.'
+        }
+
+        return $token
+    }
+    finally {
+        if (Test-Path -LiteralPath $tokenPath) {
+            Remove-Item -LiteralPath $tokenPath -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Invoke-AgentJson {
@@ -71,8 +171,27 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $CertificateThumbprint = if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) { $env:Agent__Https__Certificate__Thumbprint } else { $CertificateThumbprint }
 $JwtPublicKeyPath = if ([string]::IsNullOrWhiteSpace($JwtPublicKeyPath)) { Join-Path $root 'artifacts\test-secrets\thai-id-agent-test-signing.public.pem' } else { $JwtPublicKeyPath }
 $JwtPrivateKeyPath = if ([string]::IsNullOrWhiteSpace($JwtPrivateKeyPath)) { Join-Path $root 'artifacts\test-secrets\thai-id-agent-test-signing.private.pem' } else { $JwtPrivateKeyPath }
-$JwtPublicKeyPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPublicKeyPath)
-$JwtPrivateKeyPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPrivateKeyPath)
+
+$jwtKeyFailures = New-Object System.Collections.Generic.List[string]
+Test-JwtKeyInput -Name 'JWT public key' -Path $JwtPublicKeyPath -Failures $jwtKeyFailures
+Test-JwtKeyInput -Name 'JWT private key' -Path $JwtPrivateKeyPath -Failures $jwtKeyFailures
+
+if ($jwtKeyFailures.Count -eq 0) {
+    $resolvedJwtPublicKeyPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPublicKeyPath)
+    $resolvedJwtPrivateKeyPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPrivateKeyPath)
+    if ([string]::Equals($resolvedJwtPublicKeyPath, $resolvedJwtPrivateKeyPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        [void]$jwtKeyFailures.Add('JWT public and private key paths must be different.')
+    }
+}
+
+if ($jwtKeyFailures.Count -gt 0) {
+    Add-Result 'JWT key preflight' 'Failed' ($jwtKeyFailures -join ' ')
+    Complete-Acceptance 1
+}
+
+$JwtPublicKeyPath = $resolvedJwtPublicKeyPath
+$JwtPrivateKeyPath = $resolvedJwtPrivateKeyPath
+Add-Result 'JWT key preflight' 'Passed' 'Public and private JWT key files are present and non-empty.'
 
 if (-not (Test-IsAdministrator)) {
     if ($WhatIfPreference) {
@@ -166,12 +285,15 @@ if (-not $WhatIfPreference) {
     Invoke-RestMethod -Uri "$BaseUrl/api/v1/health" -Method Get -TimeoutSec 15 | Out-Null
     Add-Result 'HTTPS health' 'Passed' 'No certificate-validation bypass used.'
 
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\New-TestJwt.ps1') `
-        -PrivateKeyPath $JwtPrivateKeyPath `
-        -PublicKeyPath $JwtPublicKeyPath `
-        -LifetimeSeconds 60 `
-        -Force | Out-Host
-    Add-Result 'JWT issue' 'Passed' 'Created short-lived test JWT without printing token.'
+    try {
+        [void](New-TestToken -TokenName 'issue')
+        Add-Result 'JWT issue' 'Passed' 'Created short-lived test JWT without printing token.'
+    }
+    catch {
+        Add-Result 'JWT issue' 'Failed' $_.Exception.Message
+        Add-NotTestedAfterJwtFailure
+        Complete-Acceptance 1
+    }
 
     Invoke-AgentJson -Method Get -Path '/api/v1/readers' -TokenName 'readers' | Out-Null
     Add-Result 'Readers API' 'Passed'
@@ -208,7 +330,7 @@ if (-not $WhatIfPreference) {
         Add-Result 'Upgrade' 'Not Tested' 'Skipped by parameter.'
     }
     else {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Install-Service.ps1') `
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Install-Service.ps1') `
             -ServiceName $ServiceName `
             -CertificateThumbprint $CertificateThumbprint `
             -CertificateHostName $CertificateHostName `
@@ -222,9 +344,9 @@ if (-not $WhatIfPreference) {
         Add-Result 'Reinstall' 'Not Tested' 'Skipped by parameter.'
     }
     else {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Uninstall-Service.ps1') -ServiceName $ServiceName | Out-Host
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Uninstall-Service.ps1') -ServiceName $ServiceName | Out-Host
         Add-Result 'Uninstall keep data' 'Passed'
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Install-Service.ps1') `
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\Install-Service.ps1') `
             -ServiceName $ServiceName `
             -CertificateThumbprint $CertificateThumbprint `
             -CertificateHostName $CertificateHostName `
@@ -251,10 +373,4 @@ else {
     Add-Result 'Certificate retention' 'Passed' 'Script does not delete certificates.'
 }
 
-Write-Host ''
-Write-Host 'Production acceptance summary'
-$results | Format-Table -AutoSize
-
-if ($results | Where-Object Status -eq 'Failed') {
-    exit 1
-}
+Complete-Acceptance 0
