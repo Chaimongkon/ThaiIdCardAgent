@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Options;
@@ -69,7 +70,7 @@ builder.WebHost.ConfigureKestrel(options =>
     var enableDevelopmentHttps = builder.Configuration.GetValue("Agent:EnableHttpsInDevelopment", false);
     if (builder.Environment.IsDevelopment() && enableDevelopmentHttps)
     {
-        options.ListenLocalhost(18443, listenOptions => listenOptions.UseHttps());
+        options.ListenLocalhost(18443, listenOptions => listenOptions.UseHttps(AgentTlsSettings.ConfigureDevelopmentHttps));
     }
     else if (!builder.Environment.IsDevelopment())
     {
@@ -85,7 +86,7 @@ builder.WebHost.ConfigureKestrel(options =>
             throw new InvalidOperationException($"Production HTTPS certificate is invalid: {string.Join("; ", certificateErrors)}.");
         }
 
-        options.ListenLocalhost(18443, listenOptions => listenOptions.UseHttps(certificate));
+        options.ListenLocalhost(18443, listenOptions => listenOptions.UseHttps(httpsOptions => AgentTlsSettings.ConfigureProductionHttps(httpsOptions, certificate)));
     }
 
     if (builder.Environment.IsDevelopment())
@@ -238,6 +239,22 @@ static int ToStatusCode(string code) => code switch
     _ => StatusCodes.Status500InternalServerError
 };
 
+
+public static class AgentTlsSettings
+{
+    public const bool ClientCertificateRequired = false;
+
+    public static void ConfigureDevelopmentHttps(HttpsConnectionAdapterOptions options)
+    {
+        options.ClientCertificateMode = ClientCertificateMode.NoCertificate;
+    }
+
+    public static void ConfigureProductionHttps(HttpsConnectionAdapterOptions options, System.Security.Cryptography.X509Certificates.X509Certificate2 certificate)
+    {
+        options.ServerCertificate = certificate;
+        options.ClientCertificateMode = ClientCertificateMode.NoCertificate;
+    }
+}
 public sealed record ReaderRequest(string? ReaderName, string? RequestId = null);
 
 public sealed record ThaiCardReadRequest(string? ReaderName, ThaiIdCardReadOptions? Options, string? RequestId = null);

@@ -491,3 +491,5 @@ artifacts/test-secrets/
 *.private.pem
 *private*.pem
 *.jwt
+artifacts/*.cer
+*.pfx

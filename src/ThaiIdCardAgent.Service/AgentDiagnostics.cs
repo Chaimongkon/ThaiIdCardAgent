@@ -1,11 +1,14 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using ThaiIdCardAgent.Core;
 using ThaiIdCardAgent.Pcsc;
+
+public sealed record CertificateTrustDiagnostics(string? RootThumbprint, bool CurrentUserRootTrusted, bool LocalMachineRootTrusted);
 
 public static class AgentDiagnostics
 {
@@ -15,6 +18,7 @@ public static class AgentDiagnostics
         checks.Add(Check("Environment", environment.EnvironmentName, DiagnosticStatus.Pass));
         checks.Add(Check("HTTP 18442", environment.IsDevelopment() ? "enabled for Development only" : "disabled for Production", DiagnosticStatus.Pass));
         checks.Add(Check("HTTPS 18443", "loopback only", DiagnosticStatus.Pass));
+        checks.Add(Check("Client certificate required", "false", DiagnosticStatus.Pass));
 
         var allowedOrigins = configuration.GetSection("Agent:AllowedOrigins").Get<string[]>() ?? [];
         var originsAreExact = allowedOrigins.All(origin => !string.IsNullOrWhiteSpace(origin) && !origin.Contains('*', StringComparison.Ordinal));
@@ -83,6 +87,23 @@ public static class AgentDiagnostics
 
         return errors;
     }
+
+    public static CertificateTrustDiagnostics GetCertificateTrustDiagnostics(
+        X509Certificate2 certificate,
+        Func<StoreLocation, StoreName, string, bool>? storeContainsThumbprint = null)
+    {
+        var rootThumbprint = GetChainRootThumbprint(certificate);
+        if (rootThumbprint is null)
+        {
+            return new CertificateTrustDiagnostics(null, CurrentUserRootTrusted: false, LocalMachineRootTrusted: false);
+        }
+
+        var contains = storeContainsThumbprint ?? CertificateStoreContainsThumbprint;
+        return new CertificateTrustDiagnostics(
+            rootThumbprint,
+            contains(StoreLocation.CurrentUser, StoreName.Root, rootThumbprint),
+            contains(StoreLocation.LocalMachine, StoreName.Root, rootThumbprint));
+    }
     public static X509Certificate2? FindConfiguredCertificate(IConfiguration configuration)
     {
         var options = new HttpsCertificateOptions();
@@ -133,7 +154,19 @@ public static class AgentDiagnostics
 
         using var chain = new X509Chain();
         var trusted = chain.Build(certificate);
-        yield return Check("HTTPS certificate chain", trusted ? "trusted" : "not trusted by current machine", trusted ? DiagnosticStatus.Pass : DiagnosticStatus.Fail);
+        yield return Check("HTTPS certificate chain", trusted ? "trusted for current user" : "not trusted for current user", trusted ? DiagnosticStatus.Pass : DiagnosticStatus.Fail);
+
+        var trust = GetCertificateTrustDiagnostics(certificate);
+        if (trust.RootThumbprint is null)
+        {
+            yield return Check("HTTPS certificate CurrentUser Root", "chain root could not be resolved", DiagnosticStatus.Fail);
+            yield return Check("HTTPS certificate LocalMachine Root", "chain root could not be resolved", DiagnosticStatus.Fail);
+        }
+        else
+        {
+            yield return Check("HTTPS certificate CurrentUser Root", trust.CurrentUserRootTrusted ? "trusted root present" : "trusted root missing", trust.CurrentUserRootTrusted ? DiagnosticStatus.Pass : DiagnosticStatus.Fail);
+            yield return Check("HTTPS certificate LocalMachine Root", trust.LocalMachineRootTrusted ? "trusted root present" : "trusted root missing", trust.LocalMachineRootTrusted ? DiagnosticStatus.Pass : DiagnosticStatus.Fail);
+        }
     }
 
     private static async Task<DiagnosticCheck> CheckSmartCardServiceAsync(CancellationToken cancellationToken)
@@ -194,6 +227,25 @@ public static class AgentDiagnostics
         }
     }
 
+
+    private static string? GetChainRootThumbprint(X509Certificate2 certificate)
+    {
+        using var chain = new X509Chain();
+        _ = chain.Build(certificate);
+        return chain.ChainElements.Count == 0
+            ? null
+            : chain.ChainElements[^1].Certificate.Thumbprint;
+    }
+
+    private static bool CertificateStoreContainsThumbprint(StoreLocation location, StoreName name, string thumbprint)
+    {
+        using var store = new X509Store(name, location);
+        store.Open(OpenFlags.ReadOnly);
+        var normalizedThumbprint = NormalizeThumbprint(thumbprint);
+        return store.Certificates
+            .Find(X509FindType.FindByThumbprint, normalizedThumbprint, validOnly: false)
+            .Count > 0;
+    }
     private static bool CertificatePrivateKeyUsable(X509Certificate2 certificate)
     {
         try
@@ -204,8 +256,8 @@ public static class AgentDiagnostics
                 return false;
             }
 
-            var probe = System.Text.Encoding.UTF8.GetBytes("probe");
-            _ = key.SignData(probe, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+            var probe = RandomNumberGenerator.GetBytes(32);
+            _ = key.SignData(probe, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
             return true;
         }
         catch (System.Security.Cryptography.CryptographicException)
