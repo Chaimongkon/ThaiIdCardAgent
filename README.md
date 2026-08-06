@@ -119,4 +119,22 @@ The browser must get a fresh JWT from a server-side token broker for every Agent
 
 The install/uninstall scripts require Administrator rights. Do not store JWTs, private keys, PFX/P12 files, passwords, or cardholder data in Git or logs.
 
-See `docs/WEB-INTEGRATION.md`, `docs/PILOT-DEPLOYMENT.md`, `docs/SECURITY-BOUNDARIES.md`, `docs/PRODUCTION-READINESS.md`, and `docs/INSTALLATION.md` for current pilot guidance.
+## Release Packaging And Signing
+
+Build a reproducible, verifiable release package (SHA-256 manifest + `release-manifest.json` + zip),
+optionally sign it, and install with integrity enforcement:
+
+```powershell
+.\scripts\New-ReleasePackage.ps1 -Version "0.1.0-pilot"
+.\scripts\Sign-Release.ps1 -PackagePath <package> -Unsigned            # pilot (explicit unsigned)
+.\scripts\Sign-Release.ps1 -PackagePath <package> -CertificateThumbprint "<thumbprint>" -TimestampServer http://timestamp.digicert.com   # production
+.\scripts\Test-ReleaseSignature.ps1 -PackagePath <package> [-RequireSigned]
+.\scripts\Install-Service.ps1 -PackagePath <package> [-RequireSigned]
+```
+
+Pilot builds are **UnsignedPilot** (SmartScreen/unknown-publisher warnings apply). Signing requires a
+Code Signing EKU certificate; HTTPS/localhost certificates are rejected. Never commit PFX/private keys,
+passwords, JWTs, `.env.local`, generated release output, or cardholder data. See
+`docs/RELEASE-PROCESS.md` and `docs/CODE-SIGNING.md`.
+
+See `docs/WEB-INTEGRATION.md`, `docs/PILOT-DEPLOYMENT.md`, `docs/SECURITY-BOUNDARIES.md`, `docs/PRODUCTION-READINESS.md`, `docs/INSTALLATION.md`, `docs/RELEASE-PROCESS.md`, and `docs/CODE-SIGNING.md` for current pilot guidance.

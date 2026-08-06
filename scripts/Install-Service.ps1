@@ -12,11 +12,15 @@ param(
     [string]$CertificateSubjectName = 'localhost',
     [string]$CertificateHostName = 'localhost',
     [string]$ServiceAccount = 'NT AUTHORITY\LocalService',
+    [string]$PackagePath,
+    [switch]$RequireSigned,
     [switch]$SkipStart
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+Import-Module (Join-Path $PSScriptRoot 'ReleasePackaging.psm1') -Force -DisableNameChecking
 
 function Test-IsAdministrator {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -115,10 +119,39 @@ $resolvedProgramDataPath = $ExecutionContext.SessionState.Path.GetUnresolvedProv
 $configPath = Join-Path $resolvedProgramDataPath 'Config'
 $logPath = Join-Path $resolvedProgramDataPath 'Logs'
 $exePath = Join-Path $resolvedProgramPath 'ThaiIdCardAgent.Service.exe'
-$sourceExe = Join-Path $resolvedPublishPath 'ThaiIdCardAgent.Service.exe'
 
+# Source resolution:
+#   -PackagePath  -> a verified release package; copy from <PackagePath>\app after integrity checks.
+#   otherwise     -> legacy flat publish output (existing, proven behavior).
+if (-not [string]::IsNullOrWhiteSpace($PackagePath)) {
+    $resolvedPackagePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PackagePath)
+    $sourceDir = Join-Path $resolvedPackagePath 'app'
+    if (-not (Test-Path -LiteralPath $sourceDir)) {
+        throw "Release package payload folder was not found: $sourceDir"
+    }
+
+    Write-Host "Verifying release package integrity: $resolvedPackagePath"
+    $checksum = Test-ReleaseChecksum -PackageRoot $resolvedPackagePath
+    if (-not $checksum.Ok) {
+        throw "Refusing to install: checksum verification failed. Missing=$($checksum.Missing -join ',') Modified=$($checksum.Modified -join ',') Extra=$($checksum.Extra -join ',')"
+    }
+    Write-Host 'Checksum verification: OK'
+
+    if ($RequireSigned) {
+        & (Join-Path $PSScriptRoot 'Test-ReleaseSignature.ps1') -PackagePath $resolvedPackagePath -RequireSigned
+        Write-Host 'Signature verification (RequireSigned): OK'
+    }
+}
+else {
+    if ($RequireSigned) {
+        throw '-RequireSigned requires -PackagePath (a signed release package with a manifest).'
+    }
+    $sourceDir = $resolvedPublishPath
+}
+
+$sourceExe = Join-Path $sourceDir 'ThaiIdCardAgent.Service.exe'
 if (-not (Test-Path -LiteralPath $sourceExe)) {
-    throw "Publish output was not found. Run scripts\Publish-WinX64.ps1 first: $sourceExe"
+    throw "Service executable was not found. Run scripts\Publish-WinX64.ps1 (or point -PackagePath at a release package): $sourceExe"
 }
 
 $certificate = Get-HttpsCertificate -Thumbprint $CertificateThumbprint -SubjectName $CertificateSubjectName
@@ -161,13 +194,14 @@ if ($PSCmdlet.ShouldProcess($ServiceName, $action)) {
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     }
 
+    # Rollback-protected copy: snapshots the existing binaries and restores them if the
+    # copy fails, so a partial copy never replaces a working install. Config/logs under
+    # ProgramData are untouched.
     try {
-        Get-ChildItem -LiteralPath $resolvedPublishPath -Force | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $resolvedProgramPath -Recurse -Force -ErrorAction Stop
-        }
+        Copy-ReleasePayloadWithRollback -SourceDir $sourceDir -DestinationDir $resolvedProgramPath -BackupRoot $resolvedProgramDataPath | Out-Null
     }
     catch {
-        throw "Failed to copy publish output to $resolvedProgramPath. Service was not reconfigured. Error: $($_.Exception.Message)"
+        throw "Failed to copy payload to $resolvedProgramPath. Previous install restored. Error: $($_.Exception.Message)"
     }
 
     icacls $resolvedProgramDataPath /grant "${aclAccount}:(OI)(CI)(M)" /T | Out-Null

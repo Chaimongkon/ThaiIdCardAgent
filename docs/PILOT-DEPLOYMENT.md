@@ -49,3 +49,46 @@ Before committing the Phase 10 web integration as pilot-ready, run the Next.js e
 8. Connect/disconnect SSE at least 3 rounds.
 9. Confirm JWT is not in URL, `localStorage`, `sessionStorage`, console output, or logs.
 10. Confirm private key text is not present in the production browser bundle.
+
+## Release packaging and integrity (multi-machine pilot)
+
+For rollout to more than one machine, distribute a versioned release package rather than a raw
+publish folder, so each machine can verify integrity independently.
+
+1. Build the package (see [RELEASE-PROCESS.md](RELEASE-PROCESS.md)):
+
+   ```powershell
+   .\scripts\New-ReleasePackage.ps1 -Version '0.1.0-pilot'
+   ```
+
+   Produces `artifacts/release/ThaiIdCardAgent-0.1.0-pilot-win-x64/` with `app/`,
+   `checksums.sha256`, `release-manifest.json`, and a deterministic zip.
+
+2. Pilot builds are **UnsignedPilot**. Either accept unsigned explicitly
+   (`Sign-Release.ps1 -Unsigned`, loud warning) or sign with a real code signing certificate
+   for production (see [CODE-SIGNING.md](CODE-SIGNING.md)). Unsigned builds trigger SmartScreen
+   / unknown-publisher warnings and must only go to controlled pilot machines.
+
+3. On each target machine, verify before installing:
+
+   ```powershell
+   .\scripts\Test-ReleaseSignature.ps1 -PackagePath <package>            # integrity (pilot)
+   .\scripts\Test-ReleaseSignature.ps1 -PackagePath <package> -RequireSigned   # production
+   ```
+
+4. Install with integrity enforcement and rollback protection:
+
+   ```powershell
+   .\scripts\Install-Service.ps1 -PackagePath <package> [-RequireSigned]
+   ```
+
+### Unsigned pilot acceptance checklist
+
+- Package built and `checksums.sha256` verifies (`Test-ReleaseSignature.ps1`).
+- Deliberately modifying one file causes verification to **fail** (tamper is detected).
+- `release-manifest.json` shows `signingStatus = UnsignedPilot`, the git commit, and build time.
+- Package contains **no** secrets (no PFX/private key/`.env.local`/JWT/logs).
+- Operators are informed of the SmartScreen/unknown-publisher warning and the out-of-band
+  checksum verification step.
+- Upgrade rollback verified: a failed copy restores the previous working install; config/logs
+  are preserved.

@@ -497,3 +497,11 @@ artifacts/*.cer
 *.pfx
 **/.next/
 *.tsbuildinfo
+
+# ThaiIdCardAgent release packaging output (generated; never committed)
+artifacts/release/
+release-manifest.json
+checksums.sha256
+*.p12.txt
+*.pvk
+*.snk

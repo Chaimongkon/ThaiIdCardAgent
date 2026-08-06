@@ -136,3 +136,26 @@ Before broad rollout:
 - Add Authenticode signing for executable/installer.
 - Repeat service, PC/SC, HTTPS, JWT, API, SSE, reboot, and upgrade acceptance on target environments.
 - Keep private keys, JWTs, passwords, PFX/P12 files, and PII out of Git and logs.
+
+## 13. Release Packaging And Signing Readiness
+
+Pilot release packaging and code-signing readiness are implemented (Phase 11):
+
+- Reproducible, versioned release packages with a SHA-256 checksum manifest and a
+  `release-manifest.json` (product, version, git commit, UTC build time, target runtime,
+  signing status, file hashes) — see [RELEASE-PROCESS.md](RELEASE-PROCESS.md).
+- A signing pipeline that works today with a real code signing certificate (store thumbprint
+  or PFX + SecureString), enforces the Code Signing EKU, rejects expired/not-yet-valid and
+  HTTPS certificates, and fails when timestamping fails — see [CODE-SIGNING.md](CODE-SIGNING.md).
+- Explicit **UnsignedPilot** mode for controlled pilots, with the checksum manifest as the
+  out-of-band integrity check.
+- Install-time integrity verification (checksum, optional `-RequireSigned`) and
+  rollback-protected upgrades that preserve config/logs.
+- Automated coverage in `tests/ThaiIdCardAgent.Release.Tests` (checksum correctness, tamper
+  rejection, missing/malformed manifest, secret exclusion, deterministic ordering, unsigned
+  pilot, RequireSigned rejection, EKU/expiry validation, signature-failure and timestamp-failure
+  handling, PFX-password non-logging, rollback, and PowerShell 5.1 parsing).
+
+**Still required for real production signing:** a code signing certificate with the Code
+Signing EKU, issued by a CA trusted on target machines, plus a reachable RFC 3161 timestamp
+server. Pilot binaries remain unsigned until then.

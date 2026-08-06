@@ -110,3 +110,29 @@ Uninstall as Administrator:
 Uninstall removes only the agent program folder by default and keeps config/logs. Use `-RemoveData` only when config/log deletion is intended. Certificates are not deleted automatically.
 
 For a controlled upgrade where another step will start the service, use `-SkipStart`.
+
+## Verified install from a release package
+
+For pilot/production rollout, install from a release package built with
+[`New-ReleasePackage.ps1`](../scripts/New-ReleasePackage.ps1) so integrity is enforced before
+any file is copied. See [RELEASE-PROCESS.md](RELEASE-PROCESS.md).
+
+```powershell
+# Checksum-verified install/upgrade from a package
+.\scripts\Install-Service.ps1 -PackagePath <package-folder>
+
+# Additionally require valid Authenticode signatures
+.\scripts\Install-Service.ps1 -PackagePath <package-folder> -RequireSigned
+```
+
+When `-PackagePath` is supplied the installer:
+
+- Verifies the SHA-256 checksum manifest and **refuses to install a tampered package**.
+- With `-RequireSigned`, verifies Authenticode signatures and rejects unsigned/invalid ones
+  (requires a `Signed` package — see [CODE-SIGNING.md](CODE-SIGNING.md)).
+- Performs a **rollback-protected copy**: existing binaries are snapshotted and restored if the
+  copy fails, so a failed upgrade never leaves a broken install.
+- Leaves config/logs under `ProgramData` untouched during upgrade.
+
+The legacy `-PublishPath` flow (a flat publish output without a manifest) continues to work
+unchanged. `-RequireSigned` requires `-PackagePath`.
