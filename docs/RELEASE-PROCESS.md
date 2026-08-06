@@ -22,15 +22,23 @@ and is covered by `tests/ThaiIdCardAgent.Release.Tests`.
 
 ## Package layout
 
+The package contains **2 top-level metadata files + 2 application files = 4 files total** for the
+self-contained single-file Windows Service build:
+
 ```
 ThaiIdCardAgent-<version>-win-x64/
-  app/                     # published binaries (payload)
-    ThaiIdCardAgent.Service.exe
-    ...
-  checksums.sha256         # SHA-256 of every file under app/ (deterministic, ordinal order)
-  release-manifest.json    # product/version/commit/build time/runtime/signing status/file hashes
+  checksums.sha256         # (metadata) SHA-256 of every file under app/ (deterministic, ordinal order)
+  release-manifest.json    # (metadata) product/version/commit/build time/runtime/signing status/file hashes
+  app/                     # application payload (covered by checksums.sha256)
+    ThaiIdCardAgent.Service.exe   # self-contained single file (runtime + all managed DLLs bundled)
+    appsettings.json
 ThaiIdCardAgent-<version>-win-x64.zip
 ```
+
+The publish also emits debug symbols (`*.pdb`), `appsettings.Development.json`, and IIS/static-asset
+artifacts (`web.config`, `aspnetcorev2_inprocess.dll`, `*.staticwebassets.endpoints.json`). These are
+**excluded** from the package: the agent self-hosts via Kestrel under `UseWindowsService()` (not IIS)
+and serves no static files, so none of them are used at runtime.
 
 - `checksums.sha256` lines are `"<64-hex-uppercase><two spaces><forward-slash relative path>"`,
   sorted with an ordinal comparer, written as UTF-8 (no BOM) with LF endings.
@@ -129,9 +137,18 @@ Install/upgrade:
 - Generated release output (`artifacts/release/`, `*.zip`, `release-manifest.json`,
   `checksums.sha256`) is git-ignored.
 
+## Clean-machine acceptance
+
+Once a package/ZIP is built, verify and deploy it on a clean machine from the ZIP alone with
+[`scripts/Test-PilotDeployment.ps1`](../scripts/Test-PilotDeployment.ps1) (modes: VerifyOnly,
+Tamper, Rollback, Full). Read-only sanitized diagnostics come from
+[`scripts/Get-AgentDiagnostics.ps1`](../scripts/Get-AgentDiagnostics.ps1). See
+[PILOT-ACCEPTANCE-CHECKLIST.md](PILOT-ACCEPTANCE-CHECKLIST.md).
+
 ## Related
 
 - [CODE-SIGNING.md](CODE-SIGNING.md) — certificate requirements, timestamping, key rotation,
   compromise response.
 - [INSTALLATION.md](INSTALLATION.md) — full install/upgrade/uninstall guide.
 - [PILOT-DEPLOYMENT.md](PILOT-DEPLOYMENT.md) — multi-machine pilot rollout.
+- [PILOT-ACCEPTANCE-CHECKLIST.md](PILOT-ACCEPTANCE-CHECKLIST.md) — clean-machine acceptance checklist.

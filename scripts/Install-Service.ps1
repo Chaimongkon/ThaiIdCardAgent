@@ -111,7 +111,9 @@ if (-not (Test-IsAdministrator) -and -not $WhatIfPreference) {
     throw 'Administrator rights are required.'
 }
 
-$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$scriptDir = $PSScriptRoot
+$rootCandidate = (Join-Path $scriptDir '..')
+$root = if (Test-Path -LiteralPath (Join-Path $rootCandidate 'artifacts')) { (Resolve-Path -LiteralPath $rootCandidate).Path } else { $scriptDir }
 $PublishPath = if ([string]::IsNullOrWhiteSpace($PublishPath)) { Join-Path $root 'artifacts\publish\win-x64' } else { $PublishPath }
 $resolvedPublishPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PublishPath)
 $resolvedProgramPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ProgramPath)
@@ -202,6 +204,16 @@ if ($PSCmdlet.ShouldProcess($ServiceName, $action)) {
     }
     catch {
         throw "Failed to copy payload to $resolvedProgramPath. Previous install restored. Error: $($_.Exception.Message)"
+    }
+
+    # When installing from a release package, record its manifest in the install directory so the
+    # installed version/commit/signing status is traceable (used by Get-AgentDiagnostics and
+    # upgrade verification). This is metadata only; it is never executed.
+    if (-not [string]::IsNullOrWhiteSpace($PackagePath)) {
+        $sourceManifest = Join-Path $resolvedPackagePath 'release-manifest.json'
+        if (Test-Path -LiteralPath $sourceManifest) {
+            Copy-Item -LiteralPath $sourceManifest -Destination (Join-Path $resolvedProgramPath 'release-manifest.json') -Force
+        }
     }
 
     icacls $resolvedProgramDataPath /grant "${aclAccount}:(OI)(CI)(M)" /T | Out-Null

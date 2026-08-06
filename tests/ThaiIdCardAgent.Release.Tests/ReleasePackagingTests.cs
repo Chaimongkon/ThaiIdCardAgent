@@ -143,7 +143,7 @@ Write-Host $one
     }
 
     [Fact]
-    public void NewReleasePackage_ExcludesPdbAndDevelopmentSettingsFromPayload()
+    public void NewReleasePackage_ExcludesPdbDevelopmentAndIisArtifactsFromPayload()
     {
         var work = _ps.NewTempDir();
         var res = _ps.Run($@"
@@ -154,6 +154,9 @@ Copy-Item $UnsignedPe (Join-Path $pub 'ThaiIdCardAgent.Service.exe')
 Set-Content -Path (Join-Path $pub 'ThaiIdCardAgent.Service.pdb') -Value 'symbols' -NoNewline
 Set-Content -Path (Join-Path $pub 'appsettings.json') -Value '{{}}' -NoNewline
 Set-Content -Path (Join-Path $pub 'appsettings.Development.json') -Value '{{}}' -NoNewline
+Set-Content -Path (Join-Path $pub 'web.config') -Value '<configuration/>' -NoNewline
+Set-Content -Path (Join-Path $pub 'aspnetcorev2_inprocess.dll') -Value 'native' -NoNewline
+Set-Content -Path (Join-Path $pub 'ThaiIdCardAgent.Service.staticwebassets.endpoints.json') -Value '{{}}' -NoNewline
 & (Join-Path $ScriptsDir 'New-ReleasePackage.ps1') -Version '1.0.0' -PublishPath $pub -OutputRoot (Join-Path $work 'release') -SkipPublish *> $null
 $app = Join-Path $work 'release\ThaiIdCardAgent-1.0.0-win-x64\app'
 $names = (Get-ChildItem -LiteralPath $app -File).Name
@@ -164,6 +167,9 @@ Write-Host ('files=' + ($names -join ','))
         Assert.Contains("appsettings.json", res.StdOut);
         Assert.DoesNotContain(".pdb", res.StdOut);
         Assert.DoesNotContain("appsettings.Development.json", res.StdOut);
+        Assert.DoesNotContain("web.config", res.StdOut);
+        Assert.DoesNotContain("aspnetcorev2_inprocess.dll", res.StdOut);
+        Assert.DoesNotContain("staticwebassets.endpoints.json", res.StdOut);
     }
 
     [Fact]

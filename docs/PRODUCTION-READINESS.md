@@ -159,3 +159,27 @@ Pilot release packaging and code-signing readiness are implemented (Phase 11):
 **Still required for real production signing:** a code signing certificate with the Code
 Signing EKU, issued by a CA trusted on target machines, plus a reachable RFC 3161 timestamp
 server. Pilot binaries remain unsigned until then.
+
+## 14. Clean-Machine Pilot Acceptance (Phase 12)
+
+Clean-machine acceptance tooling is implemented so a pilot can be deployed and verified from a
+release ZIP alone (no source tree):
+
+- [`scripts/Test-PilotDeployment.ps1`](../scripts/Test-PilotDeployment.ps1) — modes VerifyOnly /
+  Tamper / Rollback (no Administrator or hardware needed) and Full (installs the service and
+  exercises the APIs). Hardware steps are interactive and skippable; a skipped step is reported
+  **Not Tested**, never Passed. A failure is never reported as Passed. The source ZIP is never
+  modified.
+- [`scripts/Get-AgentDiagnostics.ps1`](../scripts/Get-AgentDiagnostics.ps1) — read-only,
+  sanitized diagnostics with JSON export (no JWT/private key/password/Authorization/PII).
+- [PILOT-ACCEPTANCE-CHECKLIST.md](PILOT-ACCEPTANCE-CHECKLIST.md) — the machine checklist and
+  sign-off.
+- Automated coverage in `tests/ThaiIdCardAgent.Release.Tests` (valid package, missing ZIP,
+  malformed manifest, checksum mismatch, secret found, UnsignedPilot accept/reject, WhatIf no
+  side effects, tamper rejection + original ZIP unmodified, rollback, config/log retention,
+  diagnostics-no-secret, PowerShell 5.1 parsing).
+
+**Status:** the automated modes pass without hardware. **Clean-machine acceptance on a real
+pilot machine (install, HTTPS/service/reader, hardware transitions, reboot, upgrade, rollback)
+is operator-run and remains PENDING** until executed and signed off. This is **not** a claim of
+full production readiness.

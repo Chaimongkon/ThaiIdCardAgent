@@ -39,6 +39,25 @@ $pkg = Join-Path $work ('release\ThaiIdCardAgent-{version}-win-x64')
 $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddDays({validDays})
 ";
 
+    /// <summary>
+    /// Builds a real UnsignedPilot release ZIP from an unsigned PE under the given work dir and
+    /// leaves $zip (the ZIP path) and $pkgdir (the built package folder) set for the caller.
+    /// </summary>
+    public static string BuildReleaseZip(string work, string version)
+    {
+        var w = Lit(work);
+        return $@"
+$work = {w}
+$pub = Join-Path $work 'publish'
+New-Item -ItemType Directory -Force -Path $pub | Out-Null
+Copy-Item $UnsignedPe (Join-Path $pub 'ThaiIdCardAgent.Service.exe')
+Set-Content -Path (Join-Path $pub 'appsettings.json') -Value '{{}}' -NoNewline
+& (Join-Path $ScriptsDir 'New-ReleasePackage.ps1') -Version '{version}' -PublishPath $pub -OutputRoot (Join-Path $work 'release') -SkipPublish *> $null
+$zip = Join-Path $work 'release\ThaiIdCardAgent-{version}-win-x64.zip'
+$pkgdir = Join-Path $work 'release\ThaiIdCardAgent-{version}-win-x64'
+";
+    }
+
     public const string RemoveCert = @"
 $__s = [System.Security.Cryptography.X509Certificates.X509Store]::new('My','CurrentUser')
 $__s.Open('ReadWrite')

@@ -137,4 +137,27 @@ Code Signing EKU certificate; HTTPS/localhost certificates are rejected. Never c
 passwords, JWTs, `.env.local`, generated release output, or cardholder data. See
 `docs/RELEASE-PROCESS.md` and `docs/CODE-SIGNING.md`.
 
+## Clean-Machine Pilot Acceptance
+
+Deploy and verify a pilot from a release ZIP alone (no source tree). See
+`docs/PILOT-ACCEPTANCE-CHECKLIST.md`.
+
+```powershell
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode VerifyOnly   # integrity only
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode Tamper       # tamper is rejected
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode Rollback     # upgrade-failure rollback
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode Full -CertificateThumbprint <thumb> `
+    -JwtPublicKeyPath <public.pem> -JwtPrivateKeyPath <acceptance-only.pem> `
+    -JwtToolPath <bundle>\ThaiIdCardAgent.TestJwt.exe -UpgradeZipPath <release-next.zip>   # Administrator; installs + hardware
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode PostReboot   # after a real reboot
+.\scripts\Get-AgentDiagnostics.ps1 [-AsJson]                                          # read-only, sanitized
+```
+
+Hardware steps are interactive and skippable; a skipped step is reported **Not Tested**, never Passed.
+Reboot is verified only by the explicit `-Mode PostReboot` stage after a real reboot. A failure is
+never reported as Passed. The source ZIP is never modified. Full-mode JWT minting uses a published
+`ThaiIdCardAgent.TestJwt.exe` (`-JwtToolPath`) so no source tree / .NET SDK is needed on the pilot
+machine. Clean-machine acceptance on a real pilot machine is **operator-run and still pending**;
+the automated modes above run without hardware. See `docs/PILOT-ACCEPTANCE-CHECKLIST.md`.
+
 See `docs/WEB-INTEGRATION.md`, `docs/PILOT-DEPLOYMENT.md`, `docs/SECURITY-BOUNDARIES.md`, `docs/PRODUCTION-READINESS.md`, `docs/INSTALLATION.md`, `docs/RELEASE-PROCESS.md`, and `docs/CODE-SIGNING.md` for current pilot guidance.

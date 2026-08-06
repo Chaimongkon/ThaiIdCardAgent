@@ -82,6 +82,26 @@ publish folder, so each machine can verify integrity independently.
    .\scripts\Install-Service.ps1 -PackagePath <package> [-RequireSigned]
    ```
 
+### Clean-machine acceptance (from the release ZIP)
+
+On a fresh Windows machine or VM with no source tree, drive acceptance from the ZIP with
+[`scripts/Test-PilotDeployment.ps1`](../scripts/Test-PilotDeployment.ps1) and record results in
+[PILOT-ACCEPTANCE-CHECKLIST.md](PILOT-ACCEPTANCE-CHECKLIST.md):
+
+```powershell
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode VerifyOnly
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode Tamper
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode Rollback
+.\scripts\Test-PilotDeployment.ps1 -ReleaseZipPath <release.zip> -Mode Full `
+    -CertificateThumbprint <thumb> -CertificateHostName localhost `
+    -JwtPublicKeyPath <public.pem> -JwtPrivateKeyPath <acceptance-only.pem> -AllowedOrigin https://localhost:3000
+.\scripts\Get-AgentDiagnostics.ps1 -AsJson > agent-diagnostics.json   # sanitized; safe to attach
+```
+
+Verify/Tamper/Rollback run without Administrator or hardware; Full installs the service and
+exercises the APIs, with interactive, skippable hardware steps (skipped = Not Tested). Clean-machine
+acceptance on a real pilot machine is operator-run and remains pending until executed.
+
 ### Unsigned pilot acceptance checklist
 
 - Package built and `checksums.sha256` verifies (`Test-ReleaseSignature.ps1`).

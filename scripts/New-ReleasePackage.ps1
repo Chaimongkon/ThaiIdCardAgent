@@ -21,7 +21,16 @@ param(
     [string]$Version = '0.1.0-pilot',
     [string]$OutputRoot,
     [string]$PublishPath,
-    [string[]]$ExcludeFromPayload = @('*.pdb', 'appsettings.Development.json', 'appsettings.*.Development.json'),
+    # Excluded: debug symbols, Development settings, and IIS/static-asset publish artifacts that
+    # the Kestrel Windows Service never uses (web.config + ANCM native module + static web assets
+    # manifest; the app self-hosts via UseWindowsService and serves no static files).
+    [string[]]$ExcludeFromPayload = @(
+        '*.pdb',
+        'appsettings.Development.json', 'appsettings.*.Development.json',
+        'web.config',
+        'aspnetcorev2_inprocess.dll',
+        '*.staticwebassets.endpoints.json'
+    ),
     [switch]$SkipPublish
 )
 

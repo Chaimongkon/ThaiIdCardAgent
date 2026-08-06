@@ -4,6 +4,7 @@ param(
     [string]$BaseUrl = 'https://localhost:18443',
     [string]$JwtPublicKeyPath,
     [string]$JwtPrivateKeyPath,
+    [string]$JwtToolPath,
     [string]$AllowedOrigin = 'https://localhost:3000',
     [int]$TimeoutSeconds = 30,
     [int]$RepeatConnections = 3
@@ -12,11 +13,29 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$JwtPublicKeyPath = if ([string]::IsNullOrWhiteSpace($JwtPublicKeyPath)) { Join-Path $root 'artifacts\test-secrets\thai-id-agent-test-signing.public.pem' } else { $JwtPublicKeyPath }
-$JwtPrivateKeyPath = if ([string]::IsNullOrWhiteSpace($JwtPrivateKeyPath)) { Join-Path $root 'artifacts\test-secrets\thai-id-agent-test-signing.private.pem' } else { $JwtPrivateKeyPath }
-$JwtPublicKeyPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPublicKeyPath)
-$JwtPrivateKeyPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPrivateKeyPath)
+$scriptDir = $PSScriptRoot
+$rootCandidate = (Join-Path $scriptDir '..')
+$root = if (Test-Path -LiteralPath (Join-Path $rootCandidate 'artifacts')) { (Resolve-Path -LiteralPath $rootCandidate).Path } else { $scriptDir }
+
+$JwtPublicKeyPath = if ([string]::IsNullOrWhiteSpace($JwtPublicKeyPath)) {
+    $defPub = Join-Path $root 'artifacts\test-secrets\thai-id-agent-test-signing.public.pem'
+    if (Test-Path -LiteralPath $defPub) { $defPub } else { $null }
+} else { $JwtPublicKeyPath }
+
+$JwtPrivateKeyPath = if ([string]::IsNullOrWhiteSpace($JwtPrivateKeyPath)) {
+    $defPriv = Join-Path $root 'artifacts\test-secrets\thai-id-agent-test-signing.private.pem'
+    if (Test-Path -LiteralPath $defPriv) { $defPriv } else { $null }
+} else { $JwtPrivateKeyPath }
+
+$JwtPublicKeyPath = if ($JwtPublicKeyPath) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPublicKeyPath) } else { $null }
+$JwtPrivateKeyPath = if ($JwtPrivateKeyPath) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JwtPrivateKeyPath) } else { $null }
+
+if ([string]::IsNullOrWhiteSpace($JwtToolPath)) {
+    $localExe = Join-Path $scriptDir 'ThaiIdCardAgent.TestJwt.exe'
+    if (Test-Path -LiteralPath $localExe) {
+        $JwtToolPath = (Resolve-Path -LiteralPath $localExe).Path
+    }
+}
 
 $results = New-Object System.Collections.Generic.List[object]
 
@@ -41,7 +60,7 @@ function Test-KeyFile {
     }
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "$Name file was not found."
+        throw "$Name file was not found: $Path"
     }
 
     $item = Get-Item -LiteralPath $Path
@@ -55,27 +74,49 @@ function New-TestJwtToken {
 
     $tokenPath = Join-Path $env:TEMP ("thai-id-agent-sse-{0}-{1}.jwt" -f $Purpose, [guid]::NewGuid().ToString('N'))
     try {
-        $jwtArgs = @(
-            '-NoProfile',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            (Join-Path $script:root 'scripts\New-TestJwt.ps1'),
-            '-PrivateKeyPath',
-            $script:JwtPrivateKeyPath,
-            '-PublicKeyPath',
-            $script:JwtPublicKeyPath,
-            '-TokenOutputPath',
-            $tokenPath,
-            '-LifetimeSeconds',
-            '60',
-            '-Force'
-        )
+        if (-not [string]::IsNullOrWhiteSpace($JwtToolPath)) {
+            $toolArgs = @(
+                '--private-key', $script:JwtPrivateKeyPath,
+                '--public-key', $script:JwtPublicKeyPath,
+                '--token-output', $tokenPath,
+                '--issuer', 'thai-id-card-agent-client',
+                '--audience', 'thai-id-card-agent',
+                '--subject', ("sse-acceptance-" + $Purpose),
+                '--workstation-id', $env:COMPUTERNAME,
+                '--lifetime-seconds', '60',
+                '--force'
+            )
+            & $JwtToolPath @toolArgs | Out-Null
+        }
+        else {
+            $newTestJwtScript = if (Test-Path -LiteralPath (Join-Path $scriptDir 'New-TestJwt.ps1')) {
+                Join-Path $scriptDir 'New-TestJwt.ps1'
+            } else {
+                Join-Path $root 'scripts\New-TestJwt.ps1'
+            }
 
-        $jwtOutput = & powershell.exe @jwtArgs 2>&1
-        $jwtExitCode = $LASTEXITCODE
-        if ($jwtExitCode -ne 0) {
-            throw "JWT tool failed with exit code $jwtExitCode."
+            $jwtArgs = @(
+                '-NoProfile',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                $newTestJwtScript,
+                '-PrivateKeyPath',
+                $script:JwtPrivateKeyPath,
+                '-PublicKeyPath',
+                $script:JwtPublicKeyPath,
+                '-TokenOutputPath',
+                $tokenPath,
+                '-LifetimeSeconds',
+                '60',
+                '-Force'
+            )
+
+            $jwtOutput = & powershell.exe @jwtArgs 2>&1
+            $jwtExitCode = $LASTEXITCODE
+            if ($jwtExitCode -ne 0) {
+                throw "JWT tool failed with exit code $jwtExitCode."
+            }
         }
 
         if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {

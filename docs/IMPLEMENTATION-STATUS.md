@@ -16,6 +16,8 @@
 - Publish/install/uninstall/certificate scripts with `-WhatIf` support where applicable.
 - Production `--diagnostics` command that checks configuration without opening a listener.
 - Runnable Next.js integration example with server-side JWT broker, typed Agent client, fetch-streaming SSE, and UI tests.
+- Secure release packaging and code-signing readiness (Phase 11): reproducible package, SHA-256 manifest, `release-manifest.json`, Authenticode signing pipeline, install-time integrity + rollback.
+- Clean-machine pilot deployment acceptance tooling (Phase 12): `scripts/Test-PilotDeployment.ps1` (Full / VerifyOnly / Tamper / Rollback, `-WhatIf`) and read-only sanitized `scripts/Get-AgentDiagnostics.ps1` (JSON export), driven from a release ZIP with no source tree.
 
 ## Tested Without Hardware
 

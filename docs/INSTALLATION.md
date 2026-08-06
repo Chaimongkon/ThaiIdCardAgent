@@ -136,3 +136,18 @@ When `-PackagePath` is supplied the installer:
 
 The legacy `-PublishPath` flow (a flat publish output without a manifest) continues to work
 unchanged. `-RequireSigned` requires `-PackagePath`.
+
+## Clean-machine acceptance and diagnostics
+
+To install and verify from a release ZIP on a clean machine (no source tree), use
+[`scripts/Test-PilotDeployment.ps1`](../scripts/Test-PilotDeployment.ps1) (see
+[PILOT-ACCEPTANCE-CHECKLIST.md](PILOT-ACCEPTANCE-CHECKLIST.md)). For a read-only, sanitized health
+snapshot suitable for a support ticket:
+
+```powershell
+.\scripts\Get-AgentDiagnostics.ps1            # human-readable
+.\scripts\Get-AgentDiagnostics.ps1 -AsJson    # JSON (no secrets/PII)
+```
+
+Diagnostics never include JWTs, private keys, certificate passwords, Authorization headers, or
+cardholder data.
