@@ -17,6 +17,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using ThaiIdCardAgent.Core;
 using ThaiIdCardAgent.Pcsc;
+using ThaiIdCardAgent.Service;
 using ThaiIdCardAgent.ThaiCard;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -42,7 +43,22 @@ builder.Services.AddDataProtection()
 
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<IPiiRedactor, PiiRedactor>();
-builder.Services.AddSingleton<IThaiIdCardReader, NotConfiguredThaiIdCardReader>();
+
+// Phase 13A: the Thai card protocol lives behind IThaiCardDataProvider and nowhere else.
+// NotConfiguredThaiCardDataProvider fails closed with THAI_CARD_PROTOCOL_NOT_CONFIGURED. It is
+// replaced only by a provider built from official Department of Provincial Administration material.
+// MockThaiCardDataProvider is a test double and must never be registered here.
+builder.Services.AddSingleton<IThaiCardDataProvider, NotConfiguredThaiCardDataProvider>();
+builder.Services.AddSingleton(_ => new ThaiCardReadSettings
+{
+    Timeout = TimeSpan.FromSeconds(builder.Configuration.GetValue("Agent:CardRead:TimeoutSeconds", 15)),
+    IncludeCardAtrForDiagnostics = builder.Configuration.GetValue("Agent:CardRead:IncludeCardAtrForDiagnostics", false)
+});
+builder.Services.AddSingleton<ThaiCardIdentityReadService>();
+builder.Services.AddSingleton<IIdentityVerificationAuditSink, LoggingIdentityVerificationAuditSink>();
+builder.Services.AddSingleton<ICitizenIdCorrelationHasher>(_ => new CitizenIdCorrelationHasher(
+    builder.Configuration["Security:CitizenIdCorrelationKey"]
+        ?? Environment.GetEnvironmentVariable("Security__CitizenIdCorrelationKey")));
 builder.Services.AddPcscSmartCardServices();
 builder.Services.AddSingleton<IConfigureOptions<AgentSecurityOptions>, AgentSecurityOptionsSetup>();
 builder.Services.AddOptions<AgentSecurityOptions>()
@@ -59,7 +75,14 @@ builder.Services.AddCors(options =>
 });
 builder.Services.AddAuthentication(AgentAuthenticationHandler.SchemeName)
     .AddScheme<AuthenticationSchemeOptions, AgentAuthenticationHandler>(AgentAuthenticationHandler.SchemeName, _ => { });
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    // Reading identity data off a physical card requires an explicit permission, not merely a
+    // valid token. A caller authorized only for reader status cannot read a card.
+    options.AddPolicy(AgentPermissions.CardReadPolicy, policy => policy
+        .RequireAuthenticatedUser()
+        .RequireClaim(AgentPermissions.PermissionClaimType, AgentPermissions.CardRead));
+});
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
@@ -126,7 +149,7 @@ api.MapGet("/health", () => Results.Ok(new
     version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
     utcTime = DateTimeOffset.UtcNow
 })).AllowAnonymous();
-api.MapGet("/info", (HttpContext context, IWebHostEnvironment environment) => Results.Ok(OperationResult<object>.Ok(new
+api.MapGet("/info", (HttpContext context, IWebHostEnvironment environment, IThaiCardDataProvider cardProvider) => Results.Ok(OperationResult<object>.Ok(new
 {
     service = "Thai ID Card Local Agent",
     version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
@@ -134,7 +157,9 @@ api.MapGet("/info", (HttpContext context, IWebHostEnvironment environment) => Re
     runtimeVersion = Environment.Version.ToString(),
     environment = environment.EnvironmentName,
     workstationId = context.User.FindFirstValue("workstation_id"),
-    thaiCardProtocol = "not_configured"
+    thaiCardProtocol = cardProvider.IsConfigured ? "configured" : "not_configured",
+    thaiCardProvider = cardProvider.ProviderName,
+    cardReadPermissionGranted = AgentPermissionClaims.HasPermission(context.User, AgentPermissions.CardRead)
 }, context.TraceIdentifier))).RequireAuthorization();
 api.MapGet("/readers", async (HttpContext context, ISmartCardReaderService service, CancellationToken cancellationToken) =>
     Results.Ok(OperationResult<IReadOnlyList<SmartCardReaderInfo>>.Ok(await service.GetReadersAsync(cancellationToken).ConfigureAwait(false), context.TraceIdentifier))).RequireAuthorization();
@@ -150,12 +175,70 @@ api.MapPost("/card/atr", async (HttpContext context, [FromBody] ReaderRequest? r
     var atr = await service.GetAtrAsync(resolvedReader, cancellationToken).ConfigureAwait(false);
     return Results.Ok(OperationResult<CardAtrResponse>.Ok(new CardAtrResponse(resolvedReader, AtrFormatter.ToHex(atr), DateTimeOffset.UtcNow), context.TraceIdentifier));
 }).RequireAuthorization();
-api.MapPost("/card/read", async (HttpContext context, [FromBody] ThaiCardReadRequest? request, IThaiIdCardReader thaiIdCardReader, ISmartCardReaderService service, CancellationToken cancellationToken) =>
+// Phase 13A identity read. Explicit user action only: there is no polling or background variant,
+// and the agent never reads a card on its own initiative.
+api.MapPost("/card/read", async (
+    HttpContext context,
+    [FromBody] ThaiCardReadRequest? request,
+    ThaiCardIdentityReadService readService,
+    IIdentityVerificationAuditSink auditSink,
+    ICitizenIdCorrelationHasher correlationHasher,
+    IPiiRedactor redactor,
+    CancellationToken cancellationToken) =>
 {
-    var resolvedReader = await ResolveReaderAsync(service, request?.ReaderName, cancellationToken).ConfigureAwait(false);
-    var data = await thaiIdCardReader.ReadAsync(resolvedReader, request?.Options ?? new ThaiIdCardReadOptions(), cancellationToken).ConfigureAwait(false);
-    return Results.Ok(OperationResult<ThaiIdCardData>.Ok(data, context.TraceIdentifier));
-}).RequireAuthorization();
+    // The citizen ID is identity data: it must never be cached by a browser, proxy, or bfcache.
+    context.Response.Headers.CacheControl = "no-store, max-age=0";
+    context.Response.Headers.Pragma = "no-cache";
+
+    var requestId = context.TraceIdentifier;
+    var verificationId = Guid.NewGuid().ToString("N");
+    var staffIdentifier = context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "unknown";
+    var workstationIdentifier = context.User.FindFirstValue("workstation_id") ?? "unknown";
+    var requestedReader = request?.ReaderName;
+
+    try
+    {
+        var result = await readService.ReadAsync(requestId, requestedReader, cancellationToken).ConfigureAwait(false);
+
+        await auditSink.WriteAsync(new IdentityVerificationAuditRecord(
+            verificationId,
+            DateTimeOffset.UtcNow,
+            staffIdentifier,
+            workstationIdentifier,
+            result.ReaderName,
+            IdentityVerificationOutcome.CardReadSucceeded,
+            MemberId: null,
+            ErrorCode: null,
+            MaskedCitizenId: redactor.MaskCitizenId(result.CitizenId),
+            CitizenIdCorrelationHash: correlationHasher.ComputeHash(result.CitizenId),
+            ProviderName: result.ProviderName), cancellationToken).ConfigureAwait(false);
+
+        // The citizen ID is returned to the caller in the response body and is never logged.
+        return Results.Ok(OperationResult<ThaiCardIdentityResponse>.Ok(
+            new ThaiCardIdentityResponse(
+                verificationId,
+                result.ReaderName,
+                result.CitizenId,
+                result.ReadAtUtc,
+                result.ProviderName,
+                result.CardAtr),
+            requestId));
+    }
+    catch (Exception exception) when (exception is AgentException or OperationCanceledException)
+    {
+        var error = AgentErrorMapper.FromException(exception, app.Environment.IsDevelopment());
+        await auditSink.WriteAsync(new IdentityVerificationAuditRecord(
+            verificationId,
+            DateTimeOffset.UtcNow,
+            staffIdentifier,
+            workstationIdentifier,
+            requestedReader ?? "<default>",
+            IdentityVerificationOutcome.CardReadFailed,
+            MemberId: null,
+            ErrorCode: error.Code), CancellationToken.None).ConfigureAwait(false);
+        throw;
+    }
+}).RequireAuthorization(AgentPermissions.CardReadPolicy);
 api.MapGet("/events", async (HttpContext context, ISmartCardMonitor monitor) =>
 {
     context.Response.Headers.ContentType = "text/event-stream";
@@ -235,6 +318,11 @@ static int ToStatusCode(string code) => code switch
     AgentErrorCodes.SmartCardServiceUnavailable => StatusCodes.Status503ServiceUnavailable,
     AgentErrorCodes.ReaderUnavailable => StatusCodes.Status503ServiceUnavailable,
     AgentErrorCodes.Timeout => StatusCodes.Status504GatewayTimeout,
+    AgentErrorCodes.CardReadTimeout => StatusCodes.Status504GatewayTimeout,
+    AgentErrorCodes.CardRemovedDuringRead => StatusCodes.Status409Conflict,
+    AgentErrorCodes.CardCommunicationError => StatusCodes.Status502BadGateway,
+    AgentErrorCodes.CardDataInvalid => StatusCodes.Status422UnprocessableEntity,
+    AgentErrorCodes.ProviderUnavailable => StatusCodes.Status503ServiceUnavailable,
     AgentErrorCodes.ThaiCardProtocolNotConfigured => StatusCodes.Status501NotImplemented,
     _ => StatusCodes.Status500InternalServerError
 };
@@ -257,7 +345,19 @@ public static class AgentTlsSettings
 }
 public sealed record ReaderRequest(string? ReaderName, string? RequestId = null);
 
-public sealed record ThaiCardReadRequest(string? ReaderName, ThaiIdCardReadOptions? Options, string? RequestId = null);
+public sealed record ThaiCardReadRequest(string? ReaderName, string? RequestId = null);
+
+/// <summary>
+/// Phase 13A response. Carries the citizen ID and nothing else about the cardholder — no name,
+/// photo, address, birth date, or religion. Those are out of scope and have no field to land in.
+/// </summary>
+public sealed record ThaiCardIdentityResponse(
+    string VerificationId,
+    string ReaderName,
+    string CitizenId,
+    DateTimeOffset ReadAtUtc,
+    string ProviderName,
+    string? CardAtr);
 
 public sealed record CardAtrResponse(string ReaderName, string Atr, DateTimeOffset ReadAtUtc);
 
@@ -376,7 +476,14 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
             return AuthenticateResult.Fail("Development key is invalid.");
         }
 
-        return AuthenticateResult.Success(CreateTicket("development", "development-workstation", "development"));
+        // The development key is a single full-trust credential, so it carries every permission.
+        // It is rejected outright outside the Development environment, so this cannot widen
+        // production access.
+        return AuthenticateResult.Success(CreateTicket(
+            "development",
+            "development-workstation",
+            "development",
+            [new Claim(AgentPermissions.PermissionClaimType, AgentPermissions.CardRead)]));
     }
 
     private AuthenticateResult AuthenticateJwt()
@@ -431,7 +538,7 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
             }
 
             _cache.Set($"jti:{jti}", true, new DateTimeOffset(jwt.ValidTo, TimeSpan.Zero));
-            return AuthenticateResult.Success(CreateTicket(subject, workstationId, "jwt"));
+            return AuthenticateResult.Success(CreateTicket(subject, workstationId, "jwt", AgentPermissionClaims.FromPrincipalClaims(principal.Claims)));
         }
         catch (Exception exception) when (exception is SecurityTokenException or ArgumentException or CryptographicException)
         {
@@ -459,12 +566,19 @@ public sealed class AgentAuthenticationHandler : AuthenticationHandler<Authentic
             : new SymmetricSecurityKey(Encoding.UTF8.GetBytes(options.SymmetricSigningKey));
     }
 
-    private AuthenticationTicket CreateTicket(string subject, string workstationId, string authenticationType)
+    private AuthenticationTicket CreateTicket(string subject, string workstationId, string authenticationType, IEnumerable<Claim>? permissionClaims = null)
     {
-        var identity = new ClaimsIdentity([
-            new Claim(ClaimTypes.NameIdentifier, subject),
-            new Claim("workstation_id", workstationId)
-        ], authenticationType);
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.NameIdentifier, subject),
+            new("workstation_id", workstationId)
+        };
+        if (permissionClaims is not null)
+        {
+            claims.AddRange(permissionClaims);
+        }
+
+        var identity = new ClaimsIdentity(claims, authenticationType);
         return new AuthenticationTicket(new ClaimsPrincipal(identity), SchemeName);
     }
 

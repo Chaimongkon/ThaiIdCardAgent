@@ -14,7 +14,7 @@ var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "diagnostics";
 var readerName = GetOption(args, "--reader");
 var platform = new WinSCardPlatform();
 var service = new PcscSmartCardReaderService(platform, Options.Create(new PcscOptions()));
-var thaiCardReader = new NotConfiguredThaiIdCardReader();
+var thaiCardProvider = new NotConfiguredThaiCardDataProvider();
 
 try
 {
@@ -25,7 +25,7 @@ try
         "atr" => await ShowAtrAsync(service, readerName, cancellation.Token).ConfigureAwait(false),
         "monitor" => await MonitorAsync(service, cancellation.Token).ConfigureAwait(false),
         "diagnostics" => await ShowDiagnosticsAsync(service, platform, cancellation.Token).ConfigureAwait(false),
-        "read" => await ReadThaiCardAsync(thaiCardReader, service, readerName, cancellation.Token).ConfigureAwait(false),
+        "read" => await ReadThaiCardAsync(thaiCardProvider, service, readerName, cancellation.Token).ConfigureAwait(false),
         _ => ShowUsage()
     };
 }
@@ -160,12 +160,12 @@ static async Task<int> ShowDiagnosticsAsync(ISmartCardReaderService service, IPc
     return exitCode == 2 ? 0 : exitCode;
 }
 
-static async Task<int> ReadThaiCardAsync(IThaiIdCardReader thaiCardReader, ISmartCardReaderService service, string? readerName, CancellationToken cancellationToken)
+static async Task<int> ReadThaiCardAsync(IThaiCardDataProvider thaiCardProvider, ISmartCardReaderService service, string? readerName, CancellationToken cancellationToken)
 {
     var resolvedReader = await ResolveReaderAsync(service, readerName, cancellationToken).ConfigureAwait(false);
     try
     {
-        _ = await thaiCardReader.ReadAsync(resolvedReader, new ThaiIdCardReadOptions(), cancellationToken).ConfigureAwait(false);
+        _ = await thaiCardProvider.ReadCitizenIdAsync(new ThaiCardReadContext(Guid.NewGuid().ToString("N"), resolvedReader), cancellationToken).ConfigureAwait(false);
         return 0;
     }
     catch (ThaiCardProtocolNotConfiguredException)

@@ -11,5 +11,8 @@
   <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
-  <ItemGroup><ProjectReference Include="..\..\src\ThaiIdCardAgent.Core\ThaiIdCardAgent.Core.csproj" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ThaiIdCardAgent.Core\ThaiIdCardAgent.Core.csproj" />
+    <ProjectReference Include="..\..\src\ThaiIdCardAgent.ThaiCard\ThaiIdCardAgent.ThaiCard.csproj" />
+  </ItemGroup>
 </Project>
