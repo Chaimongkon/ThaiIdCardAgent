@@ -28,6 +28,24 @@ $pkg = Join-Path $work ('release\ThaiIdCardAgent-{version}-win-x64')
     }
 
     /// <summary>
+    /// Same as <see cref="BuildUnsignedPackage"/> but stops before the ZIP (-SkipZip), which is
+    /// the production stage order: the ZIP is produced by Sign-Release from the signed payload.
+    /// </summary>
+    public static string BuildUnsignedPackageNoZip(string work, string version)
+    {
+        var w = Lit(work);
+        return $@"
+$work = {w}
+$pub = Join-Path $work 'publish'
+New-Item -ItemType Directory -Force -Path $pub | Out-Null
+Copy-Item $UnsignedPe (Join-Path $pub 'ThaiIdCardAgent.Service.exe')
+Set-Content -Path (Join-Path $pub 'appsettings.json') -Value '{{}}' -NoNewline
+& (Join-Path $ScriptsDir 'New-ReleasePackage.ps1') -Version '{version}' -PublishPath $pub -OutputRoot (Join-Path $work 'release') -SkipPublish -SkipZip *> $null
+$pkg = Join-Path $work ('release\ThaiIdCardAgent-{version}-win-x64')
+";
+    }
+
+    /// <summary>
     /// Creates an ephemeral self-signed code-signing certificate in Cert:\CurrentUser\My and
     /// stores it in $cert. It is intentionally NOT added to any trust store: the signing tool
     /// judges a signature by presence + integrity (tamper), not OS publisher trust, which keeps

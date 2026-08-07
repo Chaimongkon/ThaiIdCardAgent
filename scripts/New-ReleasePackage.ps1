@@ -31,7 +31,15 @@ param(
         'aspnetcorev2_inprocess.dll',
         '*.staticwebassets.endpoints.json'
     ),
-    [switch]$SkipPublish
+    [switch]$SkipPublish,
+
+    # Production flow: stop after the payload is assembled and validated so scripts\Sign-Release.ps1
+    # can sign first and then produce checksums, manifest and ZIP from the SIGNED payload. Without
+    # this an unsigned ZIP is written and later overwritten, which must never be distributed.
+    [switch]$SkipZip,
+
+    # Path to the signing allowlist used to reject unexpected executable content in the payload.
+    [string]$AllowlistPath
 )
 
 Set-StrictMode -Version Latest
@@ -64,45 +72,6 @@ function Get-GitCommit {
     }
     catch { }
     return 'unknown'
-}
-
-function New-DeterministicZip {
-    param([string]$SourceDir, [string]$DestinationZip)
-
-    Add-Type -AssemblyName System.IO.Compression | Out-Null
-    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
-
-    if (Test-Path -LiteralPath $DestinationZip) { Remove-Item -LiteralPath $DestinationZip -Force }
-
-    $sourceFull = (Resolve-Path -LiteralPath $SourceDir).Path
-    $files = Get-ChildItem -LiteralPath $sourceFull -Recurse -File -Force
-    $relatives = @()
-    foreach ($f in $files) {
-        $relatives += (Get-ReleaseRelativePath -Root $sourceFull -FullName $f.FullName)
-    }
-    $relatives = @(Get-OrdinalSortedString -Value $relatives)
-
-    # Fixed timestamp for reproducibility (entries otherwise carry file mtimes).
-    $fixedTime = [System.DateTimeOffset]::new(2020, 1, 1, 0, 0, 0, [System.TimeSpan]::Zero)
-    $stream = [System.IO.File]::Open($DestinationZip, [System.IO.FileMode]::CreateNew)
-    try {
-        $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create)
-        try {
-            foreach ($rel in $relatives) {
-                $entry = $archive.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
-                $entry.LastWriteTime = $fixedTime
-                $sourceFile = Join-Path $sourceFull ($rel -replace '/', '\')
-                $entryStream = $entry.Open()
-                try {
-                    $bytes = [System.IO.File]::ReadAllBytes($sourceFile)
-                    $entryStream.Write($bytes, 0, $bytes.Length)
-                }
-                finally { $entryStream.Dispose() }
-            }
-        }
-        finally { $archive.Dispose() }
-    }
-    finally { $stream.Dispose() }
 }
 
 $gitCommit = Get-GitCommit
@@ -158,6 +127,16 @@ if ($secrets.Count -gt 0) {
     throw "Refusing to package. Forbidden secret files detected: $($secrets -join ', ')"
 }
 
+# 3b. Refuse to ship executable content the signing allowlist does not account for, and refuse a
+# payload that is missing a file the allowlist marks as required-signed. This runs for unsigned
+# pilot builds too: an unexpected binary in the payload is a packaging fault either way.
+$signingPolicy = if ([string]::IsNullOrWhiteSpace($AllowlistPath)) { Get-ReleaseSigningPolicy } else { Get-ReleaseSigningPolicy -PolicyPath $AllowlistPath }
+$signingPlan = Resolve-ReleaseSigningPlan -PackageRoot $packageRoot -Policy $signingPolicy
+if (-not $signingPlan.Ok) {
+    throw "Refusing to package. Signing allowlist violations:`n  " + ($signingPlan.Messages -join "`n  ")
+}
+Write-Host "Signing allowlist: $($signingPolicy.PolicyPath) ($($signingPlan.Required.Count) required, $($signingPlan.SignTargets.Count) signable)"
+
 # 4. SHA-256 checksum manifest (deterministic ordering).
 $manifestPath = New-ReleaseChecksumManifest -PackageRoot $packageRoot
 Write-Host "Checksum manifest: $manifestPath"
@@ -170,14 +149,28 @@ Write-ReleaseMetadata -Metadata $metadata -Path $metadataPath | Out-Null
 Write-Host "Release metadata : $metadataPath"
 
 # 6. Deterministic zip of the whole package folder.
-New-Item -ItemType Directory -Force -Path $resolvedOutputRoot | Out-Null
-New-DeterministicZip -SourceDir $packageRoot -DestinationZip $zipPath
-Write-Host "Package zip      : $zipPath"
+if (-not $SkipZip) {
+    New-Item -ItemType Directory -Force -Path $resolvedOutputRoot | Out-Null
+    New-ReleasePackageZip -PackageRoot $packageRoot -DestinationZip $zipPath | Out-Null
+    Write-Host "Package zip      : $zipPath"
+}
+else {
+    # Production ordering: nothing is zipped until the payload has been signed and verified.
+    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+    Write-Host 'Package zip      : skipped (-SkipZip). Sign-Release.ps1 produces the ZIP from the signed payload.'
+}
 
 # 7. Final verification pass so New-ReleasePackage never emits a broken package.
 $verify = Test-ReleaseChecksum -PackageRoot $packageRoot
 if (-not $verify.Ok) {
     throw "Post-build checksum verification failed. Missing=$($verify.Missing -join ',') Modified=$($verify.Modified -join ',') Extra=$($verify.Extra -join ',')"
+}
+if (-not $SkipZip) {
+    $zipVerify = Test-ReleaseZipIntegrity -ZipPath $zipPath
+    if (-not $zipVerify.Ok) {
+        throw "Final package (ZIP) verification failed.`n  " + ($zipVerify.Messages -join "`n  ")
+    }
+    Write-Host 'Final package (ZIP) verification: PASSED.'
 }
 
 Write-Host ''

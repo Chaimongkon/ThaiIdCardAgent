@@ -1,16 +1,21 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Verifies the integrity and (optionally) the Authenticode signatures of a release package.
+    Verifies the integrity and Authenticode signatures of a ThaiIdCardAgent release package.
 
 .DESCRIPTION
-    Always verifies the SHA-256 checksum manifest first (fail closed on tamper). Then reads
-    release-manifest.json and inspects Authenticode signatures on the service executable and
-    the project's own assemblies.
+    Verification order (fail closed at every step):
 
-    -RequireSigned turns an unsigned or partially signed package into a failure. Without it,
-    an UnsignedPilot package is reported with a warning and a success exit code so pilot
-    verification can proceed.
+      1. SHA-256 checksum manifest.
+      2. Signing allowlist: every required file present, no unexpected executable content.
+      3. Authenticode signature of each allowlisted file: signed, not tampered, correct signer,
+         SHA-256 digest, timestamped.
+      4. Declared signingStatus in release-manifest.json consistent with what was measured.
+
+    -RequireSigned turns an unsigned or partially signed package into a failure. Without it, an
+    UnsignedPilot package is reported with a warning and a success exit code so pilot verification
+    can proceed. -RequireTimestamp and -RequireRfc3161Timestamp add timestamp requirements;
+    -ExpectedSignerThumbprint / -ExpectedSignerSubject reject a package signed by anyone else.
 
 .NOTES
     Windows PowerShell 5.1 compatible. Non-zero exit on failure so callers can gate on it.
@@ -19,7 +24,13 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackagePath,
     [switch]$RequireSigned,
-    [switch]$RequireTimestamp
+    [switch]$RequireTimestamp,
+    [switch]$RequireRfc3161Timestamp,
+    [switch]$RequireTrustedChain,
+    [string]$ExpectedSignerThumbprint,
+    [string]$ExpectedSignerSubject,
+    [string]$AllowlistPath,
+    [ValidateSet('SHA256', 'SHA384', 'SHA512')][string]$RequiredDigestAlgorithm = 'SHA256'
 )
 
 Set-StrictMode -Version Latest
@@ -45,75 +56,72 @@ $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 $signingStatus = [string]$metadata.signingStatus
 Write-Host "Declared signing status: $signingStatus"
 
-# 3. Authenticode status of signable files.
-$targets = @(Get-ChildItem -LiteralPath $payloadDir -Recurse -File -Force |
-        Where-Object { $_.Extension -ieq '.exe' -or ($_.Extension -ieq '.dll' -and $_.Name -like 'ThaiIdCardAgent.*') })
+# 3. Signing allowlist and per-file signature status.
+$policy = if ([string]::IsNullOrWhiteSpace($AllowlistPath)) { Get-ReleaseSigningPolicy } else { Get-ReleaseSigningPolicy -PolicyPath $AllowlistPath }
+Write-Host "Signing allowlist: $($policy.PolicyPath)"
 
-# A file is "signed" when a signer certificate is attached. 'HashMismatch' means the file was
-# modified after signing (tamper) and is always rejected. 'NotSigned'/no signer is unsigned.
-# A non-Valid status with a signer present (e.g. the signing CA is not installed on this
-# verification machine) counts as signed-but-untrusted: OS publisher trust is a target-machine
-# concern, so it is reported with a warning rather than rejected.
-$valid = 0
+# Timestamp and signer requirements only apply when signatures are being demanded; an unsigned
+# pilot package is measured, reported, and gated separately below.
+$report = New-ReleaseSigningReport -PackageRoot $packageRoot -Policy $policy `
+    -ExpectedThumbprint $ExpectedSignerThumbprint -ExpectedSubject $ExpectedSignerSubject `
+    -RequiredDigestAlgorithm $RequiredDigestAlgorithm `
+    -RequireTimestamp:($RequireSigned -and $RequireTimestamp) `
+    -RequireRfc3161Timestamp:($RequireSigned -and $RequireRfc3161Timestamp) `
+    -RequireTrustedChain:$RequireTrustedChain
+
+$tampered = 0
 $unsigned = 0
-$invalid = 0
-$untrusted = 0
-$noTimestamp = 0
-foreach ($file in $targets) {
-    $rel = Get-ReleaseRelativePath -Root $packageRoot -FullName $file.FullName
-    $sig = Get-AuthenticodeSignature -LiteralPath $file.FullName
-    $hasTimestamp = ($null -ne $sig.TimeStamperCertificate)
-    $hasSigner = ($null -ne $sig.SignerCertificate)
-
-    if ($sig.Status -eq 'HashMismatch') {
-        $invalid++
-        Write-Host ("INVALID  : {0} [HashMismatch] file modified after signing" -f $rel)
+$signed = 0
+foreach ($file in $report.Files) {
+    if ($file.Tampered) {
+        $tampered++
+        Write-Host ("INVALID  : {0} [HashMismatch] file modified after signing" -f $file.RelativePath)
     }
-    elseif ($sig.Status -eq 'NotSigned' -or -not $hasSigner) {
+    elseif (-not $file.Signed) {
         $unsigned++
-        Write-Host "NotSigned: $rel"
-    }
-    elseif ($sig.Status -eq 'Valid') {
-        $valid++
-        if (-not $hasTimestamp) { $noTimestamp++ }
-        $tsNote = if ($hasTimestamp) { ' (timestamped)' } else { ' (no timestamp)' }
-        Write-Host ("Valid    : {0}{1}" -f $rel, $tsNote)
+        Write-Host "NotSigned: $($file.RelativePath)"
     }
     else {
-        # Signature applied but chain not trusted on this machine.
-        $valid++
-        $untrusted++
-        if (-not $hasTimestamp) { $noTimestamp++ }
-        Write-Host ("Signed   : {0} (untrusted chain here: {1})" -f $rel, $sig.Status)
+        $signed++
+        $ts = if ($file.Timestamped) { "$($file.TimestampKind) timestamp" } else { 'no timestamp' }
+        $trust = if ($file.Status -eq 'Valid') { 'trusted chain' } else { "untrusted chain here: $($file.Status)" }
+        Write-Host ("Signed   : {0} [{1}] ({2}; {3})" -f $file.RelativePath, $file.DigestAlgorithm, $ts, $trust)
     }
 }
 
 Write-Host ''
-Write-Host "Targets: $($targets.Count)  Signed: $valid  NotSigned: $unsigned  Invalid: $invalid  UntrustedChain: $untrusted"
-if ($untrusted -gt 0) {
-    Write-Warning "$untrusted signed file(s) do not chain to a trusted root on this machine. Ensure the signing CA is trusted on target machines."
-}
+Write-Host "Allowlist targets: $($report.SignTargetCount)  Required: $($report.RequiredFileCount)  Signed: $signed  NotSigned: $unsigned  Invalid: $tampered"
 
-# 4. Gate.
-if ($invalid -gt 0) {
-    throw "$invalid file(s) have an invalid signature. Package REJECTED."
+# 4. Gates.
+if ($report.UnexpectedExecutables.Count -gt 0) {
+    throw "Package contains executable content that is not in the signing allowlist: $($report.UnexpectedExecutables -join ', '). Package REJECTED."
+}
+if ($report.MissingRequired.Count -gt 0) {
+    throw "Package is missing required signed file(s): $($report.MissingRequired -join ', '). Package REJECTED."
+}
+if ($tampered -gt 0) {
+    throw "$tampered file(s) have an invalid signature. Package REJECTED."
 }
 
 if ($RequireSigned) {
     if ($signingStatus -ne 'Signed') {
         throw "RequireSigned: package signing status is '$signingStatus', not 'Signed'. REJECTED."
     }
-    if ($unsigned -gt 0) {
-        throw "RequireSigned: $unsigned target file(s) are not signed. REJECTED."
+    if (-not $report.Ok) {
+        throw ("RequireSigned: signature verification FAILED. REJECTED.`n  " + ($report.Messages -join "`n  "))
     }
-    if ($RequireTimestamp -and $noTimestamp -gt 0) {
-        throw "RequireSigned + RequireTimestamp: $noTimestamp signed file(s) have no timestamp. REJECTED."
-    }
+    Write-Host "Signer subject   : $($report.SignerSubject)"
+    Write-Host "Signer thumbprint: $($report.CertificateThumbprint)"
+    Write-Host "Signature digest : $($report.SignatureAlgorithm)"
+    Write-Host "Timestamp        : $($report.TimestampKind)"
     Write-Host 'RequireSigned: PASSED.'
     return
 }
 
 if ($signingStatus -ne 'Signed' -or $unsigned -gt 0) {
     Write-Warning 'Package is an UNSIGNED PILOT build. Do not use for production distribution.'
+}
+elseif (-not $report.Ok) {
+    Write-Warning ("Package declares Signed but signature verification reported problems:`n  " + ($report.Messages -join "`n  "))
 }
 Write-Host 'Verification PASSED.'

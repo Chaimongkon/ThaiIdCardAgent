@@ -9,13 +9,25 @@ changes.
 
 ## Overview
 
+The release stages run in a mandatory order. Nothing is signed until the payload is validated, and
+no checksum, manifest, or ZIP is produced until every signature has been verified:
+
 ```
-Publish (win-x64, self-contained single file)
-  -> New-ReleasePackage.ps1  -> versioned package folder + SHA-256 manifest + release-manifest.json + zip
-  -> Sign-Release.ps1        -> Authenticode signatures (optional for pilot) + refreshed manifest
-  -> Test-ReleaseSignature.ps1 -> verify checksum (+ signature when RequireSigned)
-  -> Install-Service.ps1     -> verify integrity, rollback-protected copy, install/upgrade
+1. Publish                        win-x64, self-contained single file
+2. Assemble + validate payload    exclusions, secret scan, signing allowlist
+3. Sign binaries/scripts          SHA-256 + RFC 3161 timestamp
+4. Verify signatures + timestamps every required file, signer, digest, timestamp
+5. Generate checksums             SHA-256 manifest over the SIGNED payload
+6. Generate manifest              release-manifest.json + signing evidence
+7. Create ZIP                     deterministic, from the SIGNED package folder
+8. Verify final package           extract the ZIP and verify it as a target machine would
+   -> Install-Service.ps1         verify integrity, rollback-protected copy, install/upgrade
 ```
+
+[`scripts/Invoke-ReleaseBuild.ps1`](../scripts/Invoke-ReleaseBuild.ps1) runs all eight stages in
+order and is the entry point for a production release. Underneath: `New-ReleasePackage.ps1` does
+stages 1–2 (with `-SkipZip`, so an unsigned ZIP never exists for a signed release) and
+`Sign-Release.ps1` does stages 3–8.
 
 Shared, unit-tested logic lives in [`scripts/ReleasePackaging.psm1`](../scripts/ReleasePackaging.psm1)
 and is covered by `tests/ThaiIdCardAgent.Release.Tests`.
@@ -45,48 +57,59 @@ and serves no static files, so none of them are used at runtime.
 - `release-manifest.json` never contains secrets. Certificate subject/thumbprint appear only
   when the package is `Signed`.
 
-## 1. Create an unsigned pilot package
+## 1. Build a release
 
 ```powershell
-# From the repository root
-.\scripts\New-ReleasePackage.ps1 -Version '0.1.0-pilot'
+# From the repository root.
+
+# Production (signed) — see RELEASE-SIGNING-WORKFLOW.md
+.\scripts\Invoke-ReleaseBuild.ps1 -Version '1.0.0' -SigningConfigPath <config>
+
+# Unsigned pilot
+.\scripts\Invoke-ReleaseBuild.ps1 -Version '0.1.0-pilot' -Unsigned
 ```
 
-What it does:
+What the packaging stage does:
 
 1. Runs `Publish-WinX64.ps1` (win-x64, self-contained, single file). Use `-SkipPublish
    -PublishPath <dir>` to package an existing publish output.
-2. Copies the publish output into `app/`.
+2. Copies the publish output into `app/` and drops non-runtime files.
 3. **Refuses to package** if any forbidden secret file is present (`*.pfx`, `*.key`,
    `*.pem`, `*.jwt`, `.env`/`.env.local`, `appsettings.*.local.json`, `*.log`, etc.).
-4. Writes `checksums.sha256` and `release-manifest.json` (`signingStatus = UnsignedPilot`).
-5. Produces a deterministic zip (entries added in ordinal order with a fixed timestamp).
-6. Re-verifies checksums before finishing.
+4. **Refuses to package** executable content the signing allowlist does not account for, or a
+   payload missing a file the allowlist marks required.
+5. Writes `checksums.sha256` and `release-manifest.json`.
+6. Produces a deterministic zip (entries added in ordinal order with a fixed timestamp) — deferred
+   until after signing for a signed release.
+7. Re-verifies checksums, and verifies the ZIP by extracting it.
 
-Output goes to `artifacts/release/` (git-ignored). Preview without side effects using
-`-WhatIf`.
+Output goes to `artifacts/release/` (git-ignored). Preview without side effects using `-WhatIf`.
 
 ## 2. Sign the package (production) or accept unsigned (pilot)
 
-See [CODE-SIGNING.md](CODE-SIGNING.md) for full details.
+`Invoke-ReleaseBuild.ps1` already does this. To run the stage on its own — for example to re-sign an
+existing package — see [RELEASE-SIGNING-WORKFLOW.md](RELEASE-SIGNING-WORKFLOW.md) and
+[CODE-SIGNING.md](CODE-SIGNING.md).
 
 ```powershell
-# Production: certificate from the Windows store
-.\scripts\Sign-Release.ps1 -PackagePath .\artifacts\release\ThaiIdCardAgent-0.1.0-pilot-win-x64 `
-    -CertificateThumbprint <THUMBPRINT> -TimestampServer http://timestamp.digicert.com
+# Production: hardware token / HSM certificate, from the signing configuration.
+.\scripts\Sign-Release.ps1 -PackagePath .\artifacts\release\ThaiIdCardAgent-1.0.0-win-x64 `
+    -SigningConfigPath <config>
 
-# Production: certificate from a PFX (password as SecureString)
-$pw = Read-Host -AsSecureString 'PFX password'
-.\scripts\Sign-Release.ps1 -PackagePath <package> -PfxPath <path.pfx> -PfxPassword $pw `
-    -TimestampServer http://timestamp.digicert.com
+# Development: self-signed certificate from the store.
+.\scripts\Sign-Release.ps1 -PackagePath <package> -CertificateThumbprint <THUMBPRINT> -StoreLocation CurrentUser
 
 # Pilot: explicit unsigned mode (loud warning, stays UnsignedPilot)
 .\scripts\Sign-Release.ps1 -PackagePath <package> -Unsigned
 ```
 
-Signing flips `signingStatus` to `Signed`, records the certificate subject/thumbprint and
-timestamp server in `release-manifest.json`, and **refreshes the checksum manifest** because
-the signed files changed.
+Signing flips `signingStatus` to `Signed` only after every required signature verified. It records
+the signer subject/issuer, thumbprint, signature algorithm, timestamp state, certificate validity,
+and verification result in `release-manifest.json`, **refreshes the checksum manifest** because the
+signed files changed, and **rebuilds the ZIP** from the signed payload.
+
+The timestamp service URL is never a literal in this repository: it is a configuration value that
+stays a `<PLACEHOLDER>` until procurement confirms the actual RFC 3161 service.
 
 ## 3. Verify a package
 
@@ -94,12 +117,15 @@ the signed files changed.
 # Integrity only (unsigned pilot passes with a warning)
 .\scripts\Test-ReleaseSignature.ps1 -PackagePath <package>
 
-# Require production signatures (fails on unsigned/invalid; add -RequireTimestamp to require timestamps)
-.\scripts\Test-ReleaseSignature.ps1 -PackagePath <package> -RequireSigned
+# Require production signatures
+.\scripts\Test-ReleaseSignature.ps1 -PackagePath <package> `
+    -RequireSigned -RequireTimestamp -RequireRfc3161Timestamp -RequireTrustedChain `
+    -ExpectedSignerThumbprint <THUMBPRINT>
 ```
 
-The verifier checks the checksum manifest first (fail closed on tamper), then the
-Authenticode status of the service executable and the project's own assemblies.
+The verifier checks the checksum manifest first (fail closed on tamper), then the signing allowlist
+(no missing required file, no unexpected executable content), then the embedded Authenticode
+signature of every allowlisted file.
 
 ## 4. Install / upgrade with integrity enforcement
 
@@ -147,6 +173,8 @@ Tamper, Rollback, Full). Read-only sanitized diagnostics come from
 
 ## Related
 
+- [RELEASE-SIGNING-WORKFLOW.md](RELEASE-SIGNING-WORKFLOW.md) — the production signing procedure.
+- [PRODUCTION-SIGNING-PLAN.md](PRODUCTION-SIGNING-PLAN.md) — production signing workstream.
 - [CODE-SIGNING.md](CODE-SIGNING.md) — certificate requirements, timestamping, key rotation,
   compromise response.
 - [INSTALLATION.md](INSTALLATION.md) — full install/upgrade/uninstall guide.

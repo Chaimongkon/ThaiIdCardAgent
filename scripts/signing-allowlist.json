@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "comment": [
+    "Authoritative allowlist of which release payload files may contain executable content and",
+    "which of them must carry a ThaiIdCardAgent Authenticode signature.",
+    "Patterns are matched with PowerShell -like against the forward-slash relative path of each",
+    "file inside the package root (payload files are prefixed with 'app/').",
+    "",
+    "requiredSigned          : MUST be present in the payload AND signed by the release signer.",
+    "optionalSigned          : if present, MUST be signed by the release signer.",
+    "allowedThirdPartySigned : executable content permitted to carry a non-project signature",
+    "                          (e.g. redistributed runtime components signed by their vendor).",
+    "allowedUnsigned         : executable content explicitly permitted to be unsigned. Keep empty",
+    "                          for production releases; every entry here is an accepted risk.",
+    "executableExtensions    : any payload file with one of these extensions that matches none of",
+    "                          the lists above is rejected as unexpected executable content."
+  ],
+  "version": 1,
+  "requiredSigned": [
+    "app/ThaiIdCardAgent.Service.exe"
+  ],
+  "optionalSigned": [
+    "app/ThaiIdCardAgent.*.dll",
+    "app/ThaiIdCardAgent.*.exe",
+    "app/*.ps1",
+    "app/*.psm1",
+    "app/*.psd1"
+  ],
+  "allowedThirdPartySigned": [],
+  "allowedUnsigned": [],
+  "executableExtensions": [
+    ".exe",
+    ".dll",
+    ".sys",
+    ".drv",
+    ".ocx",
+    ".cpl",
+    ".scr",
+    ".efi",
+    ".msi",
+    ".msp",
+    ".msix",
+    ".appx",
+    ".cab",
+    ".com",
+    ".ps1",
+    ".psm1",
+    ".psd1",
+    ".bat",
+    ".cmd",
+    ".vbs",
+    ".vbe",
+    ".js",
+    ".jse",
+    ".wsf",
+    ".wsh",
+    ".jar",
+    ".node",
+    ".pyd"
+  ]
+}

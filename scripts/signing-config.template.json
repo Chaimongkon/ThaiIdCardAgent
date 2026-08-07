@@ -1,0 +1,50 @@
+{
+  "comment": [
+    "Template for the production release signing configuration.",
+    "",
+    "Copy this file OUTSIDE the repository (for example to the signing workstation's protected",
+    "config directory), replace every <PLACEHOLDER> with the confirmed value, and pass the copy to",
+    "New-ReleasePackage.ps1 / Sign-Release.ps1 with -SigningConfigPath.",
+    "",
+    "THIS FILE MUST NEVER CONTAIN A SECRET. No PIN, no token password, no PFX password, no HSM",
+    "credential, no API key. New-ReleaseSigningOption rejects the configuration if a secret-looking",
+    "key or a secret-carrying signtool argument is present, and refuses to run while any required",
+    "value is still an unresolved <PLACEHOLDER>.",
+    "",
+    "The certificate vendor, the issuing CA subject and the RFC 3161 timestamp URL are deliberately",
+    "left as placeholders: they are filled in only once the actual certificate provider and",
+    "timestamp service have been confirmed during procurement."
+  ],
+  "version": 1,
+
+  "backend": "SignTool",
+  "certificateSource": "Store",
+  "storeLocation": "LocalMachine",
+
+  "certificateThumbprint": "<CODE_SIGNING_CERTIFICATE_SHA1_THUMBPRINT>",
+  "expectedSignerSubject": "<CODE_SIGNING_CERTIFICATE_SUBJECT_DN>",
+  "expectedSignerIssuer": "<ISSUING_CA_SUBJECT_DN>",
+
+  "timestampServerUrl": "<RFC3161_TIMESTAMP_SERVICE_URL>",
+  "timestampDigestAlgorithm": "SHA256",
+  "fileDigestAlgorithm": "SHA256",
+  "requireRfc3161Timestamp": true,
+  "requireTrustedChain": true,
+  "minimumCertificateRemainingDays": 30,
+
+  "signToolPath": "",
+  "additionalSignToolArguments": [],
+
+  "allowlistPath": "signing-allowlist.json",
+
+  "keyCustody": {
+    "comment": [
+      "Recorded for release evidence only; never used to authenticate. Values are non-secret",
+      "descriptors of where the private key lives and who is allowed to operate it."
+    ],
+    "privateKeyStorage": "<HardwareToken | HSM | CloudHSM>",
+    "tokenOrHsmModel": "<TOKEN_OR_HSM_MODEL>",
+    "cryptographicProvider": "<CSP_OR_KSP_NAME>",
+    "authorizedSignerRole": "<RELEASE_SIGNING_OFFICER_ROLE_NAME>"
+  }
+}

@@ -20,6 +20,30 @@ $script:ReleaseSecretPatterns = @(
 # Code Signing EKU (never Server Authentication 1.3.6.1.5.5.7.3.1).
 $script:CodeSigningEku = '1.3.6.1.5.5.7.3.3'
 
+# Authenticode digest algorithm OIDs, read out of the embedded PKCS#7 SignerInfo. SHA-1 is
+# recorded so a weak signature can be reported and rejected rather than silently accepted.
+$script:AuthenticodeDigestOid = @{
+    '1.3.14.3.2.26'           = 'SHA1'
+    '2.16.840.1.101.3.4.2.1'  = 'SHA256'
+    '2.16.840.1.101.3.4.2.2'  = 'SHA384'
+    '2.16.840.1.101.3.4.2.3'  = 'SHA512'
+}
+
+# Unsigned-attribute OIDs that carry a timestamp. RFC 3161 (szOID_RFC3161_counterSign) is the
+# production requirement; the legacy Authenticode counter-signature is recognised so a legacy-only
+# timestamp can be reported and rejected instead of passing as "timestamped".
+$script:Rfc3161CounterSignOid = '1.3.6.1.4.1.311.3.3.1'
+$script:LegacyCounterSignOid = '1.2.840.113549.1.9.6'
+
+# Configuration keys and signtool arguments that would carry a credential. Present so the signing
+# configuration and any caller-supplied signtool arguments fail closed instead of leaking a PIN or
+# password into source control, logs, command history, or release evidence.
+$script:ForbiddenSigningConfigKeyPattern = '(?i)(password|passwd|pwd|passphrase|\bpin\b|secret|credential|apikey|api_key|accesskey|token)'
+$script:ForbiddenSignToolArgument = @('/p', '-p', '/password', '--password', '/pin', '-pin', '/kp', '/csppin', '/du')
+
+# Required signing-configuration values. A value left as an unresolved <PLACEHOLDER> is rejected.
+$script:RequiredSigningConfigField = @('certificateThumbprint', 'timestampServerUrl')
+
 function Get-ReleaseSecretPattern {
     # Exposed for tests / diagnostics.
     return , $script:ReleaseSecretPatterns
@@ -251,13 +275,18 @@ function Test-CodeSigningCertificate {
     <#
         Validates that a certificate is usable for Authenticode code signing.
         Throws (fail closed) for: no private key, missing Code Signing EKU,
-        not-yet-valid, or expired. Rejects HTTPS/Server-Authentication certificates
-        because they lack the Code Signing EKU.
+        not-yet-valid, expired, too close to expiry, or a signer identity that does not
+        match the expected subject/thumbprint. Rejects HTTPS/Server-Authentication
+        certificates because they lack the Code Signing EKU.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
-        [datetime]$Now = (Get-Date)
+        [datetime]$Now = (Get-Date),
+        [string]$ExpectedSubject,
+        [string]$ExpectedThumbprint,
+        [string]$ExpectedIssuer,
+        [int]$MinimumRemainingDays = 0
     )
 
     if (-not $Certificate.HasPrivateKey) {
@@ -283,7 +312,628 @@ function Test-CodeSigningCertificate {
         throw "Certificate has expired (NotAfter=$($Certificate.NotAfter.ToUniversalTime().ToString('o')))."
     }
 
+    # Signer identity: refuse to sign with a certificate other than the one the release was
+    # authorized to use. Comparison is on the exact subject DN / thumbprint from configuration.
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedThumbprint)) {
+        $expected = ($ExpectedThumbprint -replace '\s', '').ToUpperInvariant()
+        $actual = ($Certificate.Thumbprint -replace '\s', '').ToUpperInvariant()
+        if ($actual -ne $expected) {
+            throw "Signer mismatch: certificate thumbprint '$actual' does not match the expected thumbprint '$expected'."
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSubject) -and
+        -not [string]::Equals($Certificate.Subject.Trim(), $ExpectedSubject.Trim(), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Signer mismatch: certificate subject '$($Certificate.Subject)' does not match the expected subject '$ExpectedSubject'."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedIssuer) -and
+        -not [string]::Equals($Certificate.Issuer.Trim(), $ExpectedIssuer.Trim(), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Signer mismatch: certificate issuer '$($Certificate.Issuer)' does not match the expected issuer '$ExpectedIssuer'."
+    }
+
+    # Renewal guard: stop a release that would be signed with a certificate about to expire.
+    if ($MinimumRemainingDays -gt 0) {
+        $remaining = ($Certificate.NotAfter - $Now).TotalDays
+        if ($remaining -lt $MinimumRemainingDays) {
+            throw ("Certificate expires in {0:N1} day(s), which is below the required minimum of {1} day(s). Renew the certificate before signing." -f $remaining, $MinimumRemainingDays)
+        }
+    }
+
     return $true
+}
+
+function Get-ReleaseSigningPolicy {
+    <#
+        Loads the signing allowlist that decides which payload files may contain executable
+        content and which of them must carry a release signature. Fails closed when the file is
+        missing, malformed, or does not declare requiredSigned / executableExtensions.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$PolicyPath = (Join-Path $PSScriptRoot 'signing-allowlist.json')
+    )
+
+    if (-not (Test-Path -LiteralPath $PolicyPath -PathType Leaf)) {
+        throw "Signing allowlist was not found: $PolicyPath"
+    }
+
+    try {
+        $raw = Get-Content -LiteralPath $PolicyPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Signing allowlist is malformed JSON ($PolicyPath): $($_.Exception.Message)"
+    }
+
+    function Get-PolicyList([object]$Source, [string]$Name, [bool]$Mandatory) {
+        if ($Source.PSObject.Properties.Name -notcontains $Name) {
+            if ($Mandatory) { throw "Signing allowlist is missing the required '$Name' array." }
+            return @()
+        }
+        return @($Source.$Name)
+    }
+
+    $required = @(Get-PolicyList $raw 'requiredSigned' $true)
+    $executable = @(Get-PolicyList $raw 'executableExtensions' $true)
+    if ($required.Count -eq 0) {
+        throw 'Signing allowlist declares no requiredSigned entries; refusing to sign a release with nothing required.'
+    }
+    if ($executable.Count -eq 0) {
+        throw 'Signing allowlist declares no executableExtensions; unexpected executable content could not be detected.'
+    }
+
+    return [pscustomobject]@{
+        PolicyPath              = (Resolve-Path -LiteralPath $PolicyPath).Path
+        RequiredSigned          = $required
+        OptionalSigned          = @(Get-PolicyList $raw 'optionalSigned' $false)
+        AllowedThirdPartySigned = @(Get-PolicyList $raw 'allowedThirdPartySigned' $false)
+        AllowedUnsigned         = @(Get-PolicyList $raw 'allowedUnsigned' $false)
+        ExecutableExtensions    = @($executable | ForEach-Object { $_.ToLowerInvariant() })
+    }
+}
+
+function Test-ReleasePathPattern {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Pattern
+    )
+
+    if ($null -eq $Pattern) { return $false }
+    foreach ($p in $Pattern) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        if ($RelativePath -like $p) { return $true }
+    }
+    return $false
+}
+
+function Resolve-ReleaseSigningPlan {
+    <#
+        Classifies every payload file against the signing allowlist and returns the plan:
+        which files must be signed by the release signer, which may be, which executable content
+        is allowed to carry a third-party signature or no signature, and which executable content
+        is unexpected. Also reports literal requiredSigned entries that are absent from the payload.
+
+        Never throws for a policy violation: the caller decides whether to reject, so the full set
+        of problems can be reported in one pass.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PackageRoot,
+        [object]$Policy,
+        [string]$PayloadSubdirectory = 'app'
+    )
+
+    if ($null -eq $Policy) { $Policy = Get-ReleaseSigningPolicy }
+    $root = (Resolve-Path -LiteralPath $PackageRoot).Path
+
+    $required = @()
+    $optional = @()
+    $thirdParty = @()
+    $allowedUnsigned = @()
+    $unexpected = @()
+
+    foreach ($file in (Get-ReleasePayloadFile -PackageRoot $root -PayloadSubdirectory $PayloadSubdirectory)) {
+        $rel = Get-ReleaseRelativePath -Root $root -FullName $file.FullName
+        $entry = [pscustomobject]@{ RelativePath = $rel; FullName = $file.FullName }
+
+        if (Test-ReleasePathPattern -RelativePath $rel -Pattern $Policy.RequiredSigned) { $required += $entry; continue }
+        if (Test-ReleasePathPattern -RelativePath $rel -Pattern $Policy.OptionalSigned) { $optional += $entry; continue }
+        if (Test-ReleasePathPattern -RelativePath $rel -Pattern $Policy.AllowedThirdPartySigned) { $thirdParty += $entry; continue }
+        if (Test-ReleasePathPattern -RelativePath $rel -Pattern $Policy.AllowedUnsigned) { $allowedUnsigned += $entry; continue }
+
+        $extension = [System.IO.Path]::GetExtension($rel)
+        if (-not [string]::IsNullOrEmpty($extension) -and $Policy.ExecutableExtensions -contains $extension.ToLowerInvariant()) {
+            $unexpected += $entry
+        }
+    }
+
+    # Literal (wildcard-free) requiredSigned entries name a file that must exist.
+    $present = @($required | ForEach-Object { $_.RelativePath })
+    $missingRequired = @()
+    foreach ($pattern in $Policy.RequiredSigned) {
+        if ($pattern -match '[\*\?\[]') { continue }
+        if ($present -notcontains $pattern) { $missingRequired += $pattern }
+    }
+
+    $messages = @()
+    foreach ($m in $missingRequired) { $messages += "Required signed file is missing from the payload: $m" }
+    foreach ($u in $unexpected) { $messages += "Unexpected executable content (not in the signing allowlist): $($u.RelativePath)" }
+
+    return [pscustomobject]@{
+        Ok                      = ($missingRequired.Count -eq 0 -and $unexpected.Count -eq 0)
+        Required                = $required
+        Optional                = $optional
+        SignTargets             = @($required + $optional)
+        AllowedThirdPartySigned = $thirdParty
+        AllowedUnsigned         = $allowedUnsigned
+        UnexpectedExecutables   = $unexpected
+        MissingRequired         = $missingRequired
+        Messages                = $messages
+        PolicyPath              = $Policy.PolicyPath
+    }
+}
+
+function Get-AuthenticodeSignatureBlob {
+    <#
+        Extracts the raw embedded PKCS#7 signature from a PE image (certificate table, data
+        directory index 4) or from the "# SIG # Begin signature block" block of a script file.
+        Returns $null when the file carries no embedded signature.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $bytes = [System.IO.File]::ReadAllBytes($LiteralPath)
+    if ($bytes.Length -lt 2) { return $null }
+
+    if ($bytes[0] -eq 0x4D -and $bytes[1] -eq 0x5A) {
+        if ($bytes.Length -lt 0x40) { return $null }
+        $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+        if ($peOffset -le 0 -or ($peOffset + 26) -ge $bytes.Length) { return $null }
+        if (-not ($bytes[$peOffset] -eq 0x50 -and $bytes[$peOffset + 1] -eq 0x45)) { return $null }
+
+        $optionalHeader = $peOffset + 24
+        $magic = [System.BitConverter]::ToUInt16($bytes, $optionalHeader)
+        $dataDirectoryOffset = -1
+        if ($magic -eq 0x20B) { $dataDirectoryOffset = $optionalHeader + 112 }   # PE32+
+        elseif ($magic -eq 0x10B) { $dataDirectoryOffset = $optionalHeader + 96 } # PE32
+        if ($dataDirectoryOffset -lt 0) { return $null }
+
+        # IMAGE_DIRECTORY_ENTRY_SECURITY is index 4; for it the "VirtualAddress" is a file offset.
+        $securityEntry = $dataDirectoryOffset + (4 * 8)
+        if (($securityEntry + 8) -gt $bytes.Length) { return $null }
+        $certOffset = [System.BitConverter]::ToInt32($bytes, $securityEntry)
+        $certSize = [System.BitConverter]::ToInt32($bytes, $securityEntry + 4)
+        if ($certOffset -le 0 -or $certSize -le 8 -or ($certOffset + $certSize) -gt $bytes.Length) { return $null }
+
+        # WIN_CERTIFICATE { DWORD dwLength; WORD wRevision; WORD wCertificateType; BYTE bCertificate[] }
+        $declaredLength = [System.BitConverter]::ToInt32($bytes, $certOffset)
+        $blobLength = ([Math]::Min($declaredLength, $certSize)) - 8
+        if ($blobLength -le 0) { return $null }
+        $blob = New-Object byte[] $blobLength
+        [System.Array]::Copy($bytes, $certOffset + 8, $blob, 0, $blobLength)
+        return , $blob
+    }
+
+    $text = [System.IO.File]::ReadAllText($LiteralPath)
+    $match = [regex]::Match($text, '(?ms)^#\s*SIG\s*#\s*Begin signature block\r?$(.*?)^#\s*SIG\s*#\s*End signature block')
+    if (-not $match.Success) { return $null }
+    $base64 = (($match.Groups[1].Value -split "`n") | ForEach-Object { ($_ -replace '^\s*#\s*', '').Trim() }) -join ''
+    if ([string]::IsNullOrWhiteSpace($base64)) { return $null }
+    try { return , ([System.Convert]::FromBase64String($base64)) } catch { return $null }
+}
+
+function Get-AuthenticodeSignatureDetail {
+    <#
+        Reports the facts Get-AuthenticodeSignature does not expose: the Authenticode digest
+        algorithm actually used, and whether the timestamp is an RFC 3161 timestamp or the legacy
+        Authenticode counter-signature. Both are read out of the embedded PKCS#7 SignerInfo.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $result = [pscustomobject]@{
+        HasSignature       = $false
+        DigestAlgorithm    = 'None'
+        DigestAlgorithmOid = $null
+        Timestamped        = $false
+        TimestampKind      = 'None'
+        SignerThumbprint   = $null
+        SignerCertificate  = $null
+        SignatureIntact    = $false
+    }
+
+    $blob = Get-AuthenticodeSignatureBlob -LiteralPath $LiteralPath
+    if ($null -eq $blob -or $blob.Length -eq 0) { return $result }
+
+    Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue | Out-Null
+    $cms = [System.Security.Cryptography.Pkcs.SignedCms]::new()
+    try { $cms.Decode($blob) } catch { return $result }
+    if ($cms.SignerInfos.Count -eq 0) { return $result }
+
+    $signer = $cms.SignerInfos[0]
+    $result.HasSignature = $true
+    $oid = $signer.DigestAlgorithm.Value
+    $result.DigestAlgorithmOid = $oid
+    $result.DigestAlgorithm = if ($script:AuthenticodeDigestOid.ContainsKey($oid)) { $script:AuthenticodeDigestOid[$oid] } else { $oid }
+    if ($null -ne $signer.Certificate) {
+        $result.SignerThumbprint = $signer.Certificate.Thumbprint
+        $result.SignerCertificate = $signer.Certificate
+    }
+
+    # Cryptographic check of the embedded signature itself (signature over the signed attributes),
+    # independent of whether Windows happens to resolve this file through a security catalog.
+    try {
+        $cms.CheckSignature($true)
+        $result.SignatureIntact = $true
+    }
+    catch {
+        $result.SignatureIntact = $false
+    }
+
+    foreach ($attribute in $signer.UnsignedAttributes) {
+        if ($attribute.Oid.Value -eq $script:Rfc3161CounterSignOid) {
+            $result.Timestamped = $true
+            $result.TimestampKind = 'RFC3161'
+        }
+        elseif ($attribute.Oid.Value -eq $script:LegacyCounterSignOid -and $result.TimestampKind -eq 'None') {
+            $result.Timestamped = $true
+            $result.TimestampKind = 'Legacy'
+        }
+    }
+    return $result
+}
+
+function Test-ReleaseSignatureFile {
+    <#
+        Verifies one file's Authenticode signature against the release requirements and returns a
+        structured result. Ok is $false (with Reasons) for: tamper (HashMismatch), unsigned,
+        untrusted chain when required, signer mismatch, a weaker-than-required digest algorithm,
+        a missing timestamp, or a legacy timestamp when RFC 3161 is required.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [string]$RelativePath,
+        [string]$ExpectedThumbprint,
+        [string]$ExpectedSubject,
+        [string]$RequiredDigestAlgorithm = 'SHA256',
+        [switch]$RequireTimestamp,
+        [switch]$RequireRfc3161Timestamp,
+        [switch]$RequireTrustedChain
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RelativePath)) { $RelativePath = $LiteralPath }
+    $reasons = @()
+
+    $osSignature = Get-AuthenticodeSignature -LiteralPath $LiteralPath
+    $detail = Get-AuthenticodeSignatureDetail -LiteralPath $LiteralPath
+    $status = [string]$osSignature.Status
+
+    # Identity comes from the EMBEDDED signature, never from Get-AuthenticodeSignature's signer.
+    # Windows resolves a file through a security catalog when one matches, and then reports the
+    # catalog's signer even though that signer never signed this file. A release binary must carry
+    # its own embedded signature, and that is the signature this check authenticates.
+    $signer = $detail.SignerCertificate
+    $hasSigner = ($null -ne $signer)
+
+    $signed = $false
+    if ($status -eq 'HashMismatch') {
+        $reasons += 'File was modified after signing (Authenticode HashMismatch).'
+    }
+    elseif (-not $detail.HasSignature -or -not $hasSigner) {
+        if ($status -eq 'Valid') {
+            $reasons += 'File has no embedded Authenticode signature (Windows reports it as catalog-signed, which is not acceptable for a release binary).'
+        }
+        else {
+            $reasons += 'File is not Authenticode signed.'
+        }
+    }
+    elseif (-not $detail.SignatureIntact) {
+        $reasons += 'Embedded Authenticode signature failed its cryptographic check.'
+    }
+    else {
+        $signed = $true
+
+        $osThumbprint = if ($null -ne $osSignature.SignerCertificate) { $osSignature.SignerCertificate.Thumbprint } else { $null }
+        if ($null -ne $osThumbprint -and $osThumbprint -ne $signer.Thumbprint) {
+            $reasons += "Windows reports this file as signed by '$($osSignature.SignerCertificate.Subject)' (catalog), which is not the embedded signer."
+        }
+
+        # Chain trust is evaluated on the embedded signer certificate. A failure usually means the
+        # signing CA is not installed on this verification machine, which is a target-machine trust
+        # concern, so it only fails the file when the caller demands a trusted chain.
+        if ($RequireTrustedChain) {
+            $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+            try {
+                $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+                $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+                [void]$chain.ChainPolicy.ApplicationPolicy.Add([System.Security.Cryptography.Oid]::new($script:CodeSigningEku))
+                if (-not $chain.Build($signer)) {
+                    $chainStatus = @($chain.ChainStatus | ForEach-Object { $_.Status }) -join ', '
+                    $reasons += "Signing certificate does not chain to a trusted root on this machine ($chainStatus)."
+                }
+            }
+            finally {
+                $chain.Dispose()
+            }
+        }
+    }
+
+    if ($signed) {
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedThumbprint)) {
+            $expected = ($ExpectedThumbprint -replace '\s', '').ToUpperInvariant()
+            $actual = ($signer.Thumbprint -replace '\s', '').ToUpperInvariant()
+            if ($actual -ne $expected) {
+                $reasons += "Signer mismatch: signed by thumbprint '$actual', expected '$expected'."
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedSubject) -and
+            -not [string]::Equals($signer.Subject.Trim(), $ExpectedSubject.Trim(), [System.StringComparison]::OrdinalIgnoreCase)) {
+            $reasons += "Signer mismatch: signed by '$($signer.Subject)', expected '$ExpectedSubject'."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RequiredDigestAlgorithm) -and
+            -not [string]::Equals($detail.DigestAlgorithm, $RequiredDigestAlgorithm, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $reasons += "Signature digest algorithm is '$($detail.DigestAlgorithm)', expected '$RequiredDigestAlgorithm'."
+        }
+        if ($RequireTimestamp -and -not $detail.Timestamped) {
+            $reasons += 'Signature has no timestamp.'
+        }
+        if ($RequireRfc3161Timestamp -and $detail.TimestampKind -ne 'RFC3161') {
+            $reasons += "Signature timestamp is '$($detail.TimestampKind)', an RFC 3161 timestamp is required."
+        }
+    }
+
+    return [pscustomobject]@{
+        Ok               = ($signed -and $reasons.Count -eq 0)
+        RelativePath     = $RelativePath
+        Signed           = $signed
+        Tampered         = ($status -eq 'HashMismatch')
+        Status           = $status
+        SignerSubject    = if ($hasSigner) { $signer.Subject } else { $null }
+        SignerIssuer     = if ($hasSigner) { $signer.Issuer } else { $null }
+        SignerThumbprint = if ($hasSigner) { $signer.Thumbprint } else { $null }
+        NotBeforeUtc     = if ($hasSigner) { $signer.NotBefore.ToUniversalTime().ToString('o') } else { $null }
+        NotAfterUtc      = if ($hasSigner) { $signer.NotAfter.ToUniversalTime().ToString('o') } else { $null }
+        DigestAlgorithm  = $detail.DigestAlgorithm
+        Timestamped      = $detail.Timestamped
+        TimestampKind    = $detail.TimestampKind
+        Reasons          = $reasons
+    }
+}
+
+function New-ReleaseSigningReport {
+    <#
+        Verifies a whole package against the signing allowlist and the release signing
+        requirements, and returns the evidence that release-manifest.json records. Ok is $false
+        when any required file fails, when required files are missing, or when the payload
+        contains unexpected executable content.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PackageRoot,
+        [object]$Policy,
+        [string]$PayloadSubdirectory = 'app',
+        [string]$ExpectedThumbprint,
+        [string]$ExpectedSubject,
+        [string]$RequiredDigestAlgorithm = 'SHA256',
+        [string]$TimestampServerUrl,
+        [switch]$RequireTimestamp,
+        [switch]$RequireRfc3161Timestamp,
+        [switch]$RequireTrustedChain
+    )
+
+    $root = (Resolve-Path -LiteralPath $PackageRoot).Path
+    $plan = Resolve-ReleaseSigningPlan -PackageRoot $root -Policy $Policy -PayloadSubdirectory $PayloadSubdirectory
+    $messages = @($plan.Messages)
+
+    $fileResults = @()
+    foreach ($target in $plan.SignTargets) {
+        $fileResults += Test-ReleaseSignatureFile -LiteralPath $target.FullName -RelativePath $target.RelativePath `
+            -ExpectedThumbprint $ExpectedThumbprint -ExpectedSubject $ExpectedSubject `
+            -RequiredDigestAlgorithm $RequiredDigestAlgorithm `
+            -RequireTimestamp:$RequireTimestamp -RequireRfc3161Timestamp:$RequireRfc3161Timestamp `
+            -RequireTrustedChain:$RequireTrustedChain
+    }
+
+    # Third-party executable content must still carry some signature, but not ours.
+    foreach ($target in $plan.AllowedThirdPartySigned) {
+        $r = Test-ReleaseSignatureFile -LiteralPath $target.FullName -RelativePath $target.RelativePath `
+            -RequiredDigestAlgorithm '' -RequireTrustedChain:$RequireTrustedChain
+        if (-not $r.Signed) { $messages += "Allowed third-party file is unsigned: $($target.RelativePath)" }
+        if ($r.Tampered) { $messages += "Allowed third-party file failed integrity: $($target.RelativePath)" }
+    }
+
+    $failed = @($fileResults | Where-Object { -not $_.Ok })
+    foreach ($f in $failed) {
+        $messages += ("Signature verification failed for {0}: {1}" -f $f.RelativePath, ($f.Reasons -join ' '))
+    }
+    $thirdPartyProblems = @($messages | Where-Object { $_ -like 'Allowed third-party file*' })
+
+    $signedCount = @($fileResults | Where-Object { $_.Signed }).Count
+    $primary = @($fileResults | Where-Object { $_.Signed } | Select-Object -First 1)
+    $signer = if ($primary.Count -gt 0) { $primary[0] } else { $null }
+
+    $ok = ($plan.Ok -and $failed.Count -eq 0 -and $thirdPartyProblems.Count -eq 0 -and $fileResults.Count -gt 0)
+
+    return [pscustomobject]@{
+        Ok                    = $ok
+        VerificationResult    = if ($ok) { 'Passed' } else { 'Failed' }
+        VerifiedAtUtc         = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        RequiredFileCount     = $plan.Required.Count
+        SignTargetCount       = $plan.SignTargets.Count
+        SignedFileCount       = $signedCount
+        SignerSubject         = if ($signer) { $signer.SignerSubject } else { $null }
+        SignerIssuer          = if ($signer) { $signer.SignerIssuer } else { $null }
+        CertificateThumbprint = if ($signer) { $signer.SignerThumbprint } else { $null }
+        SignatureAlgorithm    = if ($signer) { $signer.DigestAlgorithm } else { $null }
+        Timestamped           = if ($signer) { [bool]$signer.Timestamped } else { $false }
+        TimestampKind         = if ($signer) { $signer.TimestampKind } else { 'None' }
+        TimestampAuthority    = $TimestampServerUrl
+        CertificateNotBefore  = if ($signer) { $signer.NotBeforeUtc } else { $null }
+        CertificateNotAfter   = if ($signer) { $signer.NotAfterUtc } else { $null }
+        UnexpectedExecutables = @($plan.UnexpectedExecutables | ForEach-Object { $_.RelativePath })
+        MissingRequired       = $plan.MissingRequired
+        Files                 = $fileResults
+        Messages              = $messages
+        PolicyPath            = $plan.PolicyPath
+    }
+}
+
+function New-ReleaseSigningOption {
+    <#
+        Builds the validated signing options from a signing-config JSON file plus explicit
+        overrides. Fails closed when: the file is malformed, a required value is still an
+        unresolved <PLACEHOLDER>, a secret-looking key is present, or a signtool argument would
+        carry a credential. The returned object never holds a secret.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [string]$CertificateThumbprint,
+        [string]$ExpectedSignerSubject,
+        [string]$ExpectedSignerIssuer,
+        [string]$TimestampServerUrl,
+        [string]$StoreLocation,
+        [string]$SignToolPath,
+        [string]$AllowlistPath,
+        [Nullable[bool]]$RequireRfc3161Timestamp,
+        [Nullable[bool]]$RequireTrustedChain
+    )
+
+    $config = $null
+    $configDir = $PSScriptRoot
+    if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+        if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+            throw "Signing configuration was not found: $ConfigPath"
+        }
+        $resolvedConfig = (Resolve-Path -LiteralPath $ConfigPath).Path
+        $configDir = [System.IO.Path]::GetDirectoryName($resolvedConfig)
+        try { $config = Get-Content -LiteralPath $resolvedConfig -Raw | ConvertFrom-Json }
+        catch { throw "Signing configuration is malformed JSON ($resolvedConfig): $($_.Exception.Message)" }
+
+        # No credential may ever live in the signing configuration.
+        foreach ($property in $config.PSObject.Properties) {
+            if ($property.Name -match $script:ForbiddenSigningConfigKeyPattern) {
+                throw "Signing configuration contains a forbidden secret-bearing key '$($property.Name)'. PINs, passwords, and tokens must never be stored in configuration."
+            }
+        }
+    }
+
+    function Get-ConfigValue([string]$Name, $Override, $Default) {
+        if ($null -ne $Override -and -not ($Override -is [string] -and [string]::IsNullOrWhiteSpace($Override))) { return $Override }
+        if ($null -ne $config -and $config.PSObject.Properties.Name -contains $Name) {
+            $value = $config.$Name
+            if ($null -ne $value -and -not ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) { return $value }
+        }
+        return $Default
+    }
+
+    $options = [pscustomobject]@{
+        ConfigPath               = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $null } else { (Resolve-Path -LiteralPath $ConfigPath).Path }
+        Backend                  = [string](Get-ConfigValue 'backend' $null 'SignTool')
+        CertificateSource        = [string](Get-ConfigValue 'certificateSource' $null 'Store')
+        StoreLocation            = [string](Get-ConfigValue 'storeLocation' $StoreLocation 'LocalMachine')
+        CertificateThumbprint    = [string](Get-ConfigValue 'certificateThumbprint' $CertificateThumbprint '')
+        ExpectedSignerSubject    = [string](Get-ConfigValue 'expectedSignerSubject' $ExpectedSignerSubject '')
+        ExpectedSignerIssuer     = [string](Get-ConfigValue 'expectedSignerIssuer' $ExpectedSignerIssuer '')
+        TimestampServerUrl       = [string](Get-ConfigValue 'timestampServerUrl' $TimestampServerUrl '')
+        TimestampDigestAlgorithm = [string](Get-ConfigValue 'timestampDigestAlgorithm' $null 'SHA256')
+        FileDigestAlgorithm      = [string](Get-ConfigValue 'fileDigestAlgorithm' $null 'SHA256')
+        RequireRfc3161Timestamp  = [bool](Get-ConfigValue 'requireRfc3161Timestamp' $RequireRfc3161Timestamp $true)
+        RequireTrustedChain      = [bool](Get-ConfigValue 'requireTrustedChain' $RequireTrustedChain $true)
+        MinimumRemainingDays     = [int](Get-ConfigValue 'minimumCertificateRemainingDays' $null 0)
+        SignToolPath             = [string](Get-ConfigValue 'signToolPath' $SignToolPath '')
+        AdditionalSignToolArgs   = @(Get-ConfigValue 'additionalSignToolArguments' $null @())
+        AllowlistPath            = [string](Get-ConfigValue 'allowlistPath' $AllowlistPath 'signing-allowlist.json')
+    }
+
+    # An unresolved <PLACEHOLDER> means procurement is not finished; never sign with one.
+    foreach ($field in $script:RequiredSigningConfigField) {
+        $value = switch ($field) {
+            'certificateThumbprint' { $options.CertificateThumbprint }
+            'timestampServerUrl' { $options.TimestampServerUrl }
+            default { '' }
+        }
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "Signing option '$field' is not set. Supply it in the signing configuration or as a parameter."
+        }
+        if ($value -match '^\s*<.*>\s*$') {
+            throw "Signing option '$field' is still the unresolved placeholder '$value'. Fill in the confirmed value from the certificate provider before signing."
+        }
+    }
+    foreach ($optionalPlaceholder in @('ExpectedSignerSubject', 'ExpectedSignerIssuer')) {
+        if ($options.$optionalPlaceholder -match '^\s*<.*>\s*$') { $options.$optionalPlaceholder = '' }
+    }
+    if ($options.SignToolPath -match '^\s*<.*>\s*$') { $options.SignToolPath = '' }
+
+    Test-SignToolArgumentSafety -Argument $options.AdditionalSignToolArgs | Out-Null
+
+    if (-not [System.IO.Path]::IsPathRooted($options.AllowlistPath)) {
+        $options.AllowlistPath = [System.IO.Path]::GetFullPath((Join-Path $configDir $options.AllowlistPath))
+    }
+    if (-not (Test-Path -LiteralPath $options.AllowlistPath -PathType Leaf)) {
+        # Fall back to the allowlist shipped alongside the scripts.
+        $options.AllowlistPath = Join-Path $PSScriptRoot 'signing-allowlist.json'
+    }
+
+    return $options
+}
+
+function Test-SignToolArgumentSafety {
+    <#
+        Rejects signtool arguments that would carry a credential. Keeping PINs and passwords out
+        of the argument vector keeps them out of logs, process listings, and command history.
+    #>
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Argument)
+
+    if ($null -eq $Argument) { return $true }
+    foreach ($arg in $Argument) {
+        if ([string]::IsNullOrWhiteSpace($arg)) { continue }
+        $trimmed = $arg.Trim()
+        if ($script:ForbiddenSignToolArgument -contains $trimmed.ToLowerInvariant()) {
+            throw "Refusing to sign: signtool argument '$trimmed' carries a credential. PINs and passwords must be supplied interactively by the authorized signer, never on the command line."
+        }
+        if ($trimmed -match $script:ForbiddenSigningConfigKeyPattern) {
+            throw "Refusing to sign: signtool argument '$trimmed' looks like it embeds a credential."
+        }
+    }
+    return $true
+}
+
+function Get-SignToolPath {
+    <#
+        Locates signtool.exe (explicit path, PATH, then the Windows 10/11 SDK bin folders).
+        Returns $null when it cannot be found; the caller decides whether that is fatal.
+        signtool is required for production because Set-AuthenticodeSignature applies the legacy
+        Authenticode timestamp, not an RFC 3161 timestamp.
+    #>
+    [CmdletBinding()]
+    param([string]$SignToolPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($SignToolPath)) {
+        if (-not (Test-Path -LiteralPath $SignToolPath -PathType Leaf)) {
+            throw "signtool.exe was not found at the configured path: $SignToolPath"
+        }
+        return (Resolve-Path -LiteralPath $SignToolPath).Path
+    }
+
+    $command = Get-Command 'signtool.exe' -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    $candidates = @()
+    foreach ($programFiles in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+        if ([string]::IsNullOrWhiteSpace($programFiles)) { continue }
+        $binRoot = Join-Path $programFiles 'Windows Kits\10\bin'
+        if (-not (Test-Path -LiteralPath $binRoot)) { continue }
+        foreach ($versionDir in (Get-ChildItem -LiteralPath $binRoot -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($arch in @('x64', 'x86')) {
+                $candidate = Join-Path $versionDir.FullName "$arch\signtool.exe"
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidates += $candidate }
+            }
+        }
+    }
+    if ($candidates.Count -eq 0) { return $null }
+    return (@(Get-OrdinalSortedString -Value $candidates))[-1]
 }
 
 function New-ReleaseMetadata {
@@ -303,7 +953,11 @@ function New-ReleaseMetadata {
         [datetime]$BuildTimestampUtc = ([datetime]::UtcNow),
         [string]$CertificateSubject,
         [string]$CertificateThumbprint,
-        [string]$TimestampServer
+        [string]$TimestampServer,
+        # Evidence from New-ReleaseSigningReport. When supplied it is the authoritative source of
+        # the signing block; the individual certificate parameters above remain for callers that
+        # only have a subject/thumbprint to record.
+        [object]$SigningReport
     )
 
     $root = (Resolve-Path -LiteralPath $PackageRoot).Path
@@ -335,10 +989,37 @@ function New-ReleaseMetadata {
     }
 
     if ($SigningStatus -eq 'Signed') {
-        $metadata['signing'] = [ordered]@{
-            certificateSubject    = $CertificateSubject
-            certificateThumbprint = $CertificateThumbprint
-            timestampServer       = $TimestampServer
+        # Non-secret release evidence only: no PIN, password, key material, or file path from the
+        # signing workstation is ever recorded here.
+        if ($null -ne $SigningReport) {
+            $metadata['signing'] = [ordered]@{
+                signerSubject         = $SigningReport.SignerSubject
+                signerIssuer          = $SigningReport.SignerIssuer
+                certificateSubject    = $SigningReport.SignerSubject
+                certificateThumbprint = $SigningReport.CertificateThumbprint
+                signatureAlgorithm    = $SigningReport.SignatureAlgorithm
+                timestamped           = [bool]$SigningReport.Timestamped
+                timestampKind         = $SigningReport.TimestampKind
+                timestampServer       = if ([string]::IsNullOrWhiteSpace($SigningReport.TimestampAuthority)) { $TimestampServer } else { $SigningReport.TimestampAuthority }
+                certificateValidity   = [ordered]@{
+                    notBeforeUtc = $SigningReport.CertificateNotBefore
+                    notAfterUtc  = $SigningReport.CertificateNotAfter
+                }
+                verification          = [ordered]@{
+                    result            = $SigningReport.VerificationResult
+                    verifiedAtUtc     = $SigningReport.VerifiedAtUtc
+                    requiredFileCount = $SigningReport.RequiredFileCount
+                    signedFileCount   = $SigningReport.SignedFileCount
+                    allowlistPolicy   = [System.IO.Path]::GetFileName([string]$SigningReport.PolicyPath)
+                }
+            }
+        }
+        else {
+            $metadata['signing'] = [ordered]@{
+                certificateSubject    = $CertificateSubject
+                certificateThumbprint = $CertificateThumbprint
+                timestampServer       = $TimestampServer
+            }
         }
     }
 
@@ -381,6 +1062,100 @@ function Test-ReleaseZipEntry {
         $archive.Dispose()
     }
     return $true
+}
+
+function New-ReleasePackageZip {
+    <#
+        Writes a deterministic ZIP of the whole package folder: entries added in ordinal order
+        with a fixed entry timestamp so two builds of the same content produce the same archive.
+        Lives in the module so both New-ReleasePackage and Sign-Release rebuild the ZIP the same
+        way — the shipped ZIP must always contain the signed binaries, never a pre-signing copy.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PackageRoot,
+        [Parameter(Mandatory = $true)][string]$DestinationZip
+    )
+
+    Add-Type -AssemblyName System.IO.Compression | Out-Null
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+
+    if (Test-Path -LiteralPath $DestinationZip) { Remove-Item -LiteralPath $DestinationZip -Force }
+
+    $sourceFull = (Resolve-Path -LiteralPath $PackageRoot).Path
+    $relatives = @()
+    foreach ($file in (Get-ChildItem -LiteralPath $sourceFull -Recurse -File -Force)) {
+        $relatives += (Get-ReleaseRelativePath -Root $sourceFull -FullName $file.FullName)
+    }
+    $relatives = @(Get-OrdinalSortedString -Value $relatives)
+
+    $fixedTime = [System.DateTimeOffset]::new(2020, 1, 1, 0, 0, 0, [System.TimeSpan]::Zero)
+    $stream = [System.IO.File]::Open($DestinationZip, [System.IO.FileMode]::CreateNew)
+    try {
+        $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($relative in $relatives) {
+                $entry = $archive.CreateEntry($relative, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = $fixedTime
+                $sourceFile = Join-Path $sourceFull ($relative -replace '/', '\')
+                $entryStream = $entry.Open()
+                try {
+                    $bytes = [System.IO.File]::ReadAllBytes($sourceFile)
+                    $entryStream.Write($bytes, 0, $bytes.Length)
+                }
+                finally { $entryStream.Dispose() }
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    return $DestinationZip
+}
+
+function Test-ReleaseZipIntegrity {
+    <#
+        Final gate on the shipped artifact: extracts the ZIP to a scratch directory and verifies
+        the extracted package exactly as a target machine would — checksums, secret exclusion,
+        signing status, and (when requested) the full signing report. This catches a ZIP that was
+        built before signing or that no longer matches the package folder.
+        Always cleans up the scratch directory.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [switch]$RequireSigned,
+        [object]$SigningReportParameters
+    )
+
+    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("tia-zipverify-" + [guid]::NewGuid().ToString('N'))
+    [System.IO.Directory]::CreateDirectory($scratch) | Out-Null
+    try {
+        $extracted = Expand-ReleasePackage -ReleaseZipPath $ZipPath -DestinationRoot $scratch
+        $integrity = Test-ReleasePackageIntegrity -PackageRoot $extracted -RequireSigned:$RequireSigned
+        $messages = @($integrity.Messages)
+        $signingOk = $true
+
+        if ($RequireSigned) {
+            $splat = @{ PackageRoot = $extracted }
+            if ($null -ne $SigningReportParameters) {
+                foreach ($property in $SigningReportParameters.GetEnumerator()) { $splat[$property.Key] = $property.Value }
+            }
+            $report = New-ReleaseSigningReport @splat
+            $signingOk = $report.Ok
+            $messages += @($report.Messages)
+        }
+
+        return [pscustomobject]@{
+            Ok            = ($integrity.Ok -and $signingOk)
+            IntegrityOk   = $integrity.Ok
+            SigningOk     = $signingOk
+            SigningStatus = $integrity.SigningStatus
+            Messages      = $messages
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Expand-ReleasePackage {
@@ -928,7 +1703,19 @@ Export-ModuleMember -Function `
     Read-ReleaseChecksumManifest, `
     Test-ReleaseChecksum, `
     Test-CodeSigningCertificate, `
+    Get-ReleaseSigningPolicy, `
+    Test-ReleasePathPattern, `
+    Resolve-ReleaseSigningPlan, `
+    Get-AuthenticodeSignatureBlob, `
+    Get-AuthenticodeSignatureDetail, `
+    Test-ReleaseSignatureFile, `
+    New-ReleaseSigningReport, `
+    New-ReleaseSigningOption, `
+    Test-SignToolArgumentSafety, `
+    Get-SignToolPath, `
     Test-ReleaseZipEntry, `
+    New-ReleasePackageZip, `
+    Test-ReleaseZipIntegrity, `
     Expand-ReleasePackage, `
     Test-ReleasePackageIntegrity, `
     Copy-ReleasePayloadWithRollback, `

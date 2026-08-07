@@ -83,7 +83,7 @@ $pkg = Join-Path $work 'release\ThaiIdCardAgent-1.0.0-win-x64'
 Write-Host ('exit=' + $LASTEXITCODE)
 ");
         Assert.True(res.Succeeded, res.All);
-        Assert.Contains("Targets: 1", res.StdOut);
+        Assert.Contains("Allowlist targets: 1", res.StdOut);
         Assert.DoesNotContain("cannot be found", res.All);
     }
 
