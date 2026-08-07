@@ -1,0 +1,53 @@
+{
+  "comment": [
+    "Template for the cooperative member database lookup mapping.",
+    "",
+    "Copy this file OUTSIDE the repository, replace every <PLACEHOLDER> with the value confirmed by",
+    "the cooperative's DBA, and supply it through the MEMBER_DB_* environment variables (or by",
+    "passing a mapping object to resolveMemberDirectory).",
+    "",
+    "NO TABLE NAME, COLUMN NAME, PACKAGE NAME, OR CONNECTION STRING IS INVENTED HERE. Every value is",
+    "a placeholder until the real schema is supplied. validateMemberDatabaseMapping refuses to run",
+    "while any required value is still an unresolved <PLACEHOLDER>.",
+    "",
+    "THIS FILE MUST NEVER CONTAIN A CREDENTIAL. No username, password, wallet path, DSN, or",
+    "connection string. The database connection is owned by the host application's driver, which",
+    "implements MemberDatabaseClient; this mapping only describes the query and its result columns."
+  ],
+
+  "lookupSql": "<SELECT_STATEMENT_CONFIRMED_BY_DBA>",
+  "citizenIdParameter": "<BIND_PARAMETER_NAME_AS_USED_IN_lookupSql>",
+
+  "columns": {
+    "memberId": "<RESULT_COLUMN_FOR_INTERNAL_MEMBER_ID>",
+    "memberNo": "<RESULT_COLUMN_FOR_MEMBER_NUMBER>",
+    "fullName": "<RESULT_COLUMN_FOR_FULL_NAME>",
+    "memberType": "<RESULT_COLUMN_FOR_MEMBER_TYPE_OR_NULL>",
+    "memberStatus": "<RESULT_COLUMN_FOR_MEMBER_STATUS_OR_NULL>",
+    "photoReference": "<RESULT_COLUMN_FOR_PHOTO_REFERENCE_OR_NULL>"
+  },
+
+  "queryTimeoutMs": 5000,
+
+  "requirements": [
+    "lookupSql MUST be a single read-only SELECT (or WITH) statement.",
+    "lookupSql MUST match the citizen ID with an exact equality on the bind parameter.",
+    "lookupSql MUST NOT contain a literal citizen ID; the value is always bound as a parameter.",
+    "lookupSql MUST NOT apply its own row limit (no ROWNUM = 1, FETCH FIRST 1 ROW, TOP 1, LIMIT 1).",
+    "  A limit would hide duplicate member rows, and duplicates must fail closed, not be silently",
+    "  reduced to the first row.",
+    "lookupSql MUST NOT select the citizen ID column into the result set; the identifier goes in as",
+    "  a lookup key and does not come back out.",
+    "photoReference MUST be an identifier (URL, key, or id) for a photo the cooperative system",
+    "  already holds. It MUST NOT be image bytes or a BLOB column."
+  ],
+
+  "shapeExample": [
+    "Illustrative shape only — the identifiers below are placeholders, not a proposed schema:",
+    "",
+    "  SELECT <member_id_col>, <member_no_col>, <full_name_col>,",
+    "         <member_type_col>, <member_status_col>, <photo_ref_col>",
+    "  FROM   <schema>.<member_table>",
+    "  WHERE  <citizen_id_col> = :citizenId"
+  ]
+}
