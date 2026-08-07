@@ -39,6 +39,20 @@ export type CardAtrResponse = {
   readAtUtc: string;
 };
 
+/**
+ * Phase 13A identity read result. Carries the citizen ID and nothing else about the cardholder —
+ * no name, photo, address, or birth date. Treat `citizenId` as in-memory only: never store it,
+ * never log it, never place it in a URL.
+ */
+export type ThaiCardIdentityResponse = {
+  verificationId: string;
+  readerName: string;
+  citizenId: string;
+  readAtUtc: string;
+  providerName: string;
+  cardAtr?: string | null;
+};
+
 export type ReaderEventType = "ReaderConnected" | "ReaderDisconnected" | "CardInserted" | "CardRemoved" | "StatusChanged" | "Error";
 
 export type ReaderEvent = {
@@ -60,7 +74,17 @@ export type PublicAgentClientOptions = Omit<AgentClientOptions, "getToken"> & {
   getToken?: () => Promise<string>;
 };
 
-export type AgentFailureKind = "tls-or-network" | "timeout" | "auth" | "replay" | "card-not-present" | "agent" | "invalid-response";
+export type AgentFailureKind =
+  | "tls-or-network"
+  | "timeout"
+  | "auth"
+  | "replay"
+  | "forbidden"
+  | "card-not-present"
+  | "card-removed"
+  | "protocol-not-configured"
+  | "agent"
+  | "invalid-response";
 
 export class AgentClientError extends Error {
   constructor(
@@ -84,7 +108,24 @@ export function createThaiIdAgentClient(options: AgentClientOptions) {
     getReaders: (overrides: PublicAgentClientOptions = {}) => getReaders({ ...options, ...overrides }),
     getCardStatus: (readerName?: string, overrides: PublicAgentClientOptions = {}) => getCardStatus(readerName, { ...options, ...overrides }),
     readCardAtr: (readerName?: string, overrides: PublicAgentClientOptions = {}) => readCardAtr(readerName, { ...options, ...overrides }),
+    readCardIdentity: (readerName?: string, overrides: PublicAgentClientOptions = {}) => readCardIdentity(readerName, { ...options, ...overrides }),
   };
+}
+
+/**
+ * Reads the citizen ID from the card. Requires a token carrying the `card.read` permission.
+ *
+ * Deliberately has no retry: a retried read could read the same physical card twice and produce a
+ * duplicate verification. A failed read must be re-triggered by an explicit user action.
+ */
+export async function readCardIdentity(
+  readerName: string | undefined,
+  options: AgentClientOptions,
+): Promise<OperationResult<ThaiCardIdentityResponse>> {
+  return requestJson<OperationResult<ThaiCardIdentityResponse>>("POST", "/api/v1/card/read", options, {
+    readerName: readerName ?? null,
+    requestId: createRequestId(),
+  });
 }
 
 export async function getAgentHealth(options: PublicAgentClientOptions = {}): Promise<AgentHealth> {
@@ -118,13 +159,31 @@ export function classifyErrorPayload(status: number, payload: unknown): AgentCli
   const result = isOperationResult(payload) ? payload : null;
   const code = result?.error?.code;
   const requestId = result?.requestId ?? null;
-  if (status === 401 || status === 403) {
+  if (status === 403 || code === "FORBIDDEN") {
+    return new AgentClientError("forbidden", "This session is not permitted to read card data.", status, code, requestId);
+  }
+
+  if (status === 401) {
     const kind = code === "UNAUTHORIZED" && result?.error?.message?.toLowerCase().includes("replay") ? "replay" : "auth";
     return new AgentClientError(kind, "Agent authentication failed.", status, code, requestId);
   }
 
   if (code === "CARD_NOT_PRESENT") {
     return new AgentClientError("card-not-present", "No smart card is present in the selected reader.", status, code, requestId);
+  }
+
+  if (code === "CARD_REMOVED" || code === "CARD_REMOVED_DURING_READ") {
+    return new AgentClientError("card-removed", "The card was removed before the read completed.", status, code, requestId);
+  }
+
+  if (code === "THAI_CARD_PROTOCOL_NOT_CONFIGURED") {
+    return new AgentClientError(
+      "protocol-not-configured",
+      "The Thai card provider is not configured on this agent.",
+      status,
+      code,
+      requestId,
+    );
   }
 
   return new AgentClientError("agent", result?.error?.message || `ThaiIdCardAgent returned HTTP ${status}.`, status, code, requestId);

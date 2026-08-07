@@ -1,6 +1,25 @@
 import { createPrivateKey, randomUUID, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+/**
+ * Permissions the Agent understands.
+ *
+ * The Agent reads permissions from the `scope` claim (space-delimited) — see
+ * `AgentPermissionClaims.FromPrincipalClaims` in
+ * `src/ThaiIdCardAgent.Service/CardReadAuthorization.cs`. The literal below must stay in step with
+ * `AgentPermissions.CardRead` on that side; `tests/token-broker.test.ts` pins the claim name and
+ * value, and `CardReadEndpointTests` pins the Agent's half of the same contract.
+ */
+export const AgentPermission = {
+  /** Required by POST /api/v1/card/read. Granted only to tokens minted for a card read. */
+  CardRead: "card.read",
+} as const;
+
+export type AgentPermissionValue = (typeof AgentPermission)[keyof typeof AgentPermission];
+
+/** Every permission the broker is willing to mint. Anything else is refused. */
+const grantablePermissions: readonly string[] = [AgentPermission.CardRead];
+
 export type LocalAgentJwtOptions = {
   issuer?: string;
   audience?: string;
@@ -10,6 +29,12 @@ export type LocalAgentJwtOptions = {
   privateKeyPem?: string;
   privateKeyPath?: string;
   now?: Date;
+  /**
+   * Permissions to embed in the `scope` claim. Empty/omitted mints a token that can read reader and
+   * card status but **cannot** read a card — least privilege is the default, and `card.read` is
+   * granted only when a card read is actually being performed.
+   */
+  permissions?: readonly string[];
 };
 
 export type IssuedLocalAgentJwt = {
@@ -29,10 +54,12 @@ export function issueLocalAgentJwt(options: LocalAgentJwtOptions): IssuedLocalAg
     throw new Error("JWT ttlSeconds must be between 1 and 60 seconds.");
   }
 
+  const permissions = normalizePermissions(options.permissions);
+
   const now = options.now ?? new Date();
   const iat = Math.floor(now.getTime() / 1000);
   const exp = iat + ttlSeconds;
-  const payload = {
+  const payload: Record<string, unknown> = {
     iss: options.issuer ?? defaultIssuer,
     aud: options.audience ?? defaultAudience,
     sub: options.subject ?? defaultSubject,
@@ -42,6 +69,11 @@ export function issueLocalAgentJwt(options: LocalAgentJwtOptions): IssuedLocalAg
     iat,
     exp,
   };
+  // The claim is omitted entirely when no permission was requested, so a status-only token carries
+  // no permission surface at all rather than an empty one.
+  if (permissions.length > 0) {
+    payload.scope = permissions.join(" ");
+  }
   const header = { alg: "RS256", typ: "JWT" };
   const signingInput = `${base64urlJson(header)}.${base64urlJson(payload)}`;
   const keyObject = createPrivateKey(privateKeyPem);
@@ -52,7 +84,10 @@ export function issueLocalAgentJwt(options: LocalAgentJwtOptions): IssuedLocalAg
   };
 }
 
-export function issueLocalAgentJwtFromEnvironment(env: Record<string, string | undefined> = process.env): IssuedLocalAgentJwt {
+export function issueLocalAgentJwtFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+  permissions: readonly string[] = [],
+): IssuedLocalAgentJwt {
   return issueLocalAgentJwt({
     issuer: env.THAI_ID_AGENT_JWT_ISSUER,
     audience: env.THAI_ID_AGENT_JWT_AUDIENCE,
@@ -61,7 +96,23 @@ export function issueLocalAgentJwtFromEnvironment(env: Record<string, string | u
     ttlSeconds: parseTtl(env.THAI_ID_AGENT_JWT_TTL_SECONDS),
     privateKeyPem: env.THAI_ID_AGENT_JWT_PRIVATE_KEY_PEM,
     privateKeyPath: env.THAI_ID_AGENT_JWT_PRIVATE_KEY_PATH,
+    permissions,
   });
+}
+
+/**
+ * Validates the requested permissions against the grantable set. An unknown permission is refused
+ * rather than passed through, so a caller cannot widen its own token by inventing a scope string.
+ */
+function normalizePermissions(requested: readonly string[] | undefined): string[] {
+  if (!requested || requested.length === 0) return [];
+  const unique = Array.from(new Set(requested.map((permission) => permission.trim()).filter(Boolean)));
+  for (const permission of unique) {
+    if (!grantablePermissions.includes(permission)) {
+      throw new Error(`Refusing to mint an unknown Agent permission: '${permission}'.`);
+    }
+  }
+  return unique.sort();
 }
 
 function resolvePrivateKeyPem(options: LocalAgentJwtOptions): string {

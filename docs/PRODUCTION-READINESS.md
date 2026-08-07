@@ -72,7 +72,12 @@ Validated through the installed service:
 - `POST /api/v1/card/atr`: passed.
 - `GET /api/v1/events`: passed for CardRemoved and CardInserted.
 
-`POST /api/v1/card/read` remains intentionally not implemented and returns HTTP 501 `THAI_CARD_PROTOCOL_NOT_CONFIGURED` until a verified Thai card APDU provider is added.
+`POST /api/v1/card/read` returns HTTP 501 `THAI_CARD_PROTOCOL_NOT_CONFIGURED`. Phase 13A implemented
+the provider abstraction, read orchestration, `card.read` permission, audit trail, member
+verification flow, UI, and tests, but **no authorized provider exists**: official Department of
+Provincial Administration technical material is required before any card protocol may be
+implemented. See [THAI-CARD-PROVIDER.md](THAI-CARD-PROVIDER.md) and
+[MEMBER-IDENTITY-VERIFICATION.md](MEMBER-IDENTITY-VERIFICATION.md).
 
 ## 8. Card Transition Status
 
@@ -122,8 +127,18 @@ Automated Next.js lint, typecheck, tests, and production build passed locally. M
 
 ## 11. Remaining Risks
 
-- Authenticode/code signing for executable or installer is not implemented.
-- Thai card APDU/data provider is not implemented.
+- Authenticode/code signing pipeline is implemented but no release has been signed with a real
+  organizational certificate on a hardware token/HSM. See
+  [PRODUCTION-SIGNING-PLAN.md](PRODUCTION-SIGNING-PLAN.md).
+- **No authorized Thai card data provider exists.** Card reading is blocked pending official
+  Department of Provincial Administration technical material and written authorization
+  (`BLOCKED_OFFICIAL_PROTOCOL_REQUIRED`).
+- Member verification runs against a mock repository; the real cooperative database is not
+  connected, and operator identity in audit records is not yet taken from an authenticated staff
+  session.
+- Legal basis for processing citizen IDs under Thailand's PDPA (lawful basis, retention, data-subject
+  notice) is not established.
+- Audit storage, retention period, and access control are not defined.
 - Phase 10 web browser manual acceptance is pending.
 - Production rollout must provide managed JWT verification material and exact allowed origins.
 - Repeat acceptance is required on target hardware/driver baselines and workstation images.

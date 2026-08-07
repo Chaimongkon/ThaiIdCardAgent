@@ -2,8 +2,8 @@ import { generateKeyPairSync, verify } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { issueLocalAgentJwt, issueLocalAgentJwtFromEnvironment } from "@/lib/local-agent-jwt";
+import { describe, expect, it, vi } from "vitest";
+import { AgentPermission, issueLocalAgentJwt, issueLocalAgentJwtFromEnvironment } from "@/lib/local-agent-jwt";
 
 function keys() {
   return generateKeyPairSync("rsa", {
@@ -51,5 +51,133 @@ describe("local Agent token broker", () => {
   it("rejects token lifetimes longer than 60 seconds", () => {
     const { privateKey } = keys();
     expect(() => issueLocalAgentJwt({ privateKeyPem: privateKey, ttlSeconds: 61 })).toThrow(/between 1 and 60/);
+  });
+});
+
+/**
+ * Broker half of the permission contract that AUDIT-2026-08-07 found broken: the Agent required
+ * `agent_permission = card.read` while the broker emitted no permission claim at all.
+ *
+ * The Agent reads permissions from a space-delimited `scope` claim
+ * (`AgentPermissionClaims.FromPrincipalClaims` in
+ * src/ThaiIdCardAgent.Service/CardReadAuthorization.cs). The Agent half is pinned by
+ * `CardReadEndpointTests.BrokerStatusToken_*` / `BrokerCardReadToken_*`.
+ */
+describe("Agent permission contract", () => {
+  it("omits the scope claim entirely for a default status token", () => {
+    const { privateKey } = keys();
+
+    const claims = decodePayload(issueLocalAgentJwt({ privateKeyPem: privateKey }).token);
+
+    // No claim at all, not an empty string: a status token carries no permission surface.
+    expect(claims).not.toHaveProperty("scope");
+  });
+
+  it("emits card.read in a space-delimited scope claim when requested", () => {
+    const { privateKey } = keys();
+
+    const claims = decodePayload(
+      issueLocalAgentJwt({ privateKeyPem: privateKey, permissions: [AgentPermission.CardRead] }).token,
+    );
+
+    // The claim name and value the Agent policy requires, verbatim.
+    expect(claims.scope).toBe("card.read");
+    expect(String(claims.scope).split(" ")).toContain("card.read");
+  });
+
+  it("keeps issuer, audience, workstation, jti, and the short lifetime on a card-read token", () => {
+    const { privateKey } = keys();
+
+    const claims = decodePayload(
+      issueLocalAgentJwt({ privateKeyPem: privateKey, permissions: [AgentPermission.CardRead] }).token,
+    );
+
+    expect(claims.iss).toBe("thai-id-card-agent-client");
+    expect(claims.aud).toBe("thai-id-card-agent");
+    expect(claims.workstation_id).toBe("localhost-pilot");
+    expect(typeof claims.jti).toBe("string");
+    expect(Number(claims.exp) - Number(claims.nbf)).toBeLessThanOrEqual(60);
+  });
+
+  it("mints a distinct jti per token so replay protection still applies", () => {
+    const { privateKey } = keys();
+    const first = decodePayload(issueLocalAgentJwt({ privateKeyPem: privateKey, permissions: ["card.read"] }).token);
+    const second = decodePayload(issueLocalAgentJwt({ privateKeyPem: privateKey, permissions: ["card.read"] }).token);
+
+    expect(first.jti).not.toBe(second.jti);
+  });
+
+  it("refuses to mint an unknown permission", () => {
+    // A caller must not be able to widen its own token by inventing a scope string.
+    const { privateKey } = keys();
+
+    expect(() => issueLocalAgentJwt({ privateKeyPem: privateKey, permissions: ["card.write"] })).toThrow(/unknown Agent permission/i);
+    expect(() => issueLocalAgentJwt({ privateKeyPem: privateKey, permissions: ["*"] })).toThrow(/unknown Agent permission/i);
+  });
+
+  it("grants card.read only for the card-read purpose, through the real broker route", async () => {
+    const { privateKey } = keys();
+    const originalEnv = { ...process.env };
+    process.env.THAI_ID_AGENT_JWT_PRIVATE_KEY_PEM = privateKey;
+    try {
+      vi.resetModules();
+      const { POST } = await import("@/app/api/local-agent/token/route");
+
+      const post = (body: unknown) =>
+        POST(new Request("https://example.invalid/api/local-agent/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }));
+
+      const statusResponse = await post({ purpose: "status" });
+      const cardReadResponse = await post({ purpose: "card-read" });
+      const unknownResponse = await post({ purpose: "everything" });
+
+      const statusClaims = decodePayload(((await statusResponse.json()) as { token: string }).token);
+      const cardReadClaims = decodePayload(((await cardReadResponse.json()) as { token: string }).token);
+
+      expect(statusClaims).not.toHaveProperty("scope");
+      expect(cardReadClaims.scope).toBe("card.read");
+      expect(unknownResponse.status).toBe(400);
+      expect(statusResponse.headers.get("Cache-Control")).toContain("no-store");
+      expect(cardReadResponse.headers.get("Cache-Control")).toContain("no-store");
+    } finally {
+      process.env = { ...originalEnv };
+      vi.resetModules();
+    }
+  });
+
+  it("defaults to a status token when the request carries no body", async () => {
+    const { privateKey } = keys();
+    const originalEnv = { ...process.env };
+    process.env.THAI_ID_AGENT_JWT_PRIVATE_KEY_PEM = privateKey;
+    try {
+      vi.resetModules();
+      const { POST } = await import("@/app/api/local-agent/token/route");
+
+      const response = await POST(new Request("https://example.invalid/api/local-agent/token", { method: "POST" }));
+      const claims = decodePayload(((await response.json()) as { token: string }).token);
+
+      // Least privilege by default: a malformed or absent body must never yield card.read.
+      expect(claims).not.toHaveProperty("scope");
+    } finally {
+      process.env = { ...originalEnv };
+      vi.resetModules();
+    }
+  });
+
+  it("passes requested permissions through issueLocalAgentJwtFromEnvironment", () => {
+    const { privateKey } = keys();
+
+    const statusToken = decodePayload(
+      issueLocalAgentJwtFromEnvironment({ THAI_ID_AGENT_JWT_PRIVATE_KEY_PEM: privateKey }).token,
+    );
+    const cardReadToken = decodePayload(
+      issueLocalAgentJwtFromEnvironment({ THAI_ID_AGENT_JWT_PRIVATE_KEY_PEM: privateKey }, [AgentPermission.CardRead]).token,
+    );
+
+    expect(statusToken).not.toHaveProperty("scope");
+    expect(cardReadToken.scope).toBe("card.read");
   });
 });

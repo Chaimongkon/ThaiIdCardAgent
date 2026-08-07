@@ -1,42 +1,92 @@
 import React from "react";
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThaiIdAgentPanel } from "@/components/ThaiIdAgentPanel";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-describe("ThaiIdAgentPanel", () => {
-  it("renders required pilot controls and keeps card read disabled", () => {
-    render(<ThaiIdAgentPanel />);
+function stubAgent(cardPresent: boolean) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === "/api/local-agent/token") return json({ token: "a.b.c", expiresAtUtc: "2026-08-07T00:00:30Z" });
+    if (url.endsWith("/api/v1/health")) {
+      return json({ status: "healthy", service: "ThaiIdCardAgent", version: "1.0.0.0", utcTime: "2026-08-07T00:00:00Z" });
+    }
+    if (url.endsWith("/api/v1/readers")) {
+      return json({
+        success: true,
+        error: null,
+        requestId: "r1",
+        data: [{ name: "Reader A", isConnected: true, isCardPresent: cardPresent, atr: "3B-79", checkedAtUtc: "2026-08-07T00:00:00Z" }],
+      });
+    }
+    if (url.includes("/api/v1/card/status")) {
+      return json({
+        success: true,
+        error: null,
+        requestId: "r2",
+        data: { readerName: "Reader A", status: cardPresent ? "CardPresent" : "NoCard", atr: "3B-79", checkedAtUtc: "2026-08-07T00:00:00Z" },
+      });
+    }
+    if (url.endsWith("/api/v1/events")) {
+      return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
 
-    expect(screen.getByRole("button", { name: "Check Agent" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Refresh Readers" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Connect Events" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Card Read" })).toBeDisabled();
-    expect(screen.getByText(/Thai card protocol endpoint remains disabled/)).toBeInTheDocument();
+describe("ThaiIdAgentPanel operator view", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
-  it("shows reader, CardPresent state, and uppercase ATR from mocked Agent APIs", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "/api/local-agent/token") return json({ token: "header.payload.signature", expiresAtUtc: "2026-08-04T00:00:30Z" });
-      if (url.endsWith("/api/v1/readers")) return json({ success: true, data: [{ name: "Reader A", isConnected: true, isCardPresent: true, atr: "3B-79", checkedAtUtc: "2026-08-04T00:00:00Z" }], error: null, requestId: "r1" });
-      if (url.endsWith("/api/v1/card/atr")) return json({ success: true, data: { readerName: "Reader A", atr: "3B-79", readAtUtc: "2026-08-04T00:00:01Z" }, error: null, requestId: "r2" });
-      return json({ status: "healthy", service: "ThaiIdCardAgent", version: "1.0.0.0", utcTime: "2026-08-04T00:00:00Z" });
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  it("presents the four operator status rows and the single primary action", async () => {
+    stubAgent(false);
     render(<ThaiIdAgentPanel />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Refresh Readers" }));
-    expect(await screen.findByText("Reader A")).toBeInTheDocument();
-    expect(screen.getByText("CardPresent")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("พร้อมใช้งาน")).toBeInTheDocument());
+    expect(screen.getByText("Agent")).toBeInTheDocument();
+    expect(screen.getByText("เครื่องอ่านบัตร")).toBeInTheDocument();
+    expect(screen.getByText("ชื่อเครื่องอ่าน")).toBeInTheDocument();
+    expect(screen.getByText("บัตรประชาชน")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "ตรวจสอบการยืนยันตัวตน" })).toBeInTheDocument();
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: "Read ATR" }));
-    expect(await screen.findAllByText("3B-79")).not.toHaveLength(0);
-    expect(fetchMock.mock.calls.filter((call) => String(call[0]) === "/api/local-agent/token")).toHaveLength(2);
+  it("keeps diagnostics available but out of the primary flow", async () => {
+    stubAgent(false);
+    render(<ThaiIdAgentPanel />);
+    await waitFor(() => expect(screen.getByText("พร้อมใช้งาน")).toBeInTheDocument());
+
+    // Manual controls still exist for troubleshooting, inside a collapsed Diagnostics section.
+    const diagnostics = screen.getByText("Diagnostics / ขั้นสูง").closest("details");
+    expect(diagnostics).not.toBeNull();
+    expect(diagnostics!.open).toBe(false);
+    expect(screen.getByRole("button", { name: "Check Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh Readers" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Read ATR" })).toBeInTheDocument();
+  });
+
+  it("no longer renders the dead permanently-disabled Card Read button", async () => {
+    stubAgent(false);
+    render(<ThaiIdAgentPanel />);
+    await waitFor(() => expect(screen.getByText("พร้อมใช้งาน")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: "Card Read" })).not.toBeInTheDocument();
+  });
+
+  it("states that only the citizen ID is read", async () => {
+    stubAgent(false);
+    render(<ThaiIdAgentPanel />);
+    await waitFor(() => expect(screen.getByText("พร้อมใช้งาน")).toBeInTheDocument());
+
+    expect(screen.getByText(/ไม่อ่านรูปถ่าย ที่อยู่ ชื่อ หรือวันเกิดจากบัตร/)).toBeInTheDocument();
   });
 });
-

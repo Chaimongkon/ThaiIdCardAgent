@@ -11,8 +11,10 @@ flowchart LR
     Api --> Pcsc[PC/SC reader service]
     Pcsc --> Win[Windows Smart Card Service]
     Win --> Reader[PC/SC smart card reader]
-    Api --> Thai[Thai card provider]
-    Thai --> NotConfigured[THAI_CARD_PROTOCOL_NOT_CONFIGURED]
+    Api --> Thai[IThaiCardDataProvider]
+    Thai --> NotConfigured[NotConfigured: THAI_CARD_PROTOCOL_NOT_CONFIGURED]
+    Thai -.requires official DOPA material.-> Official[OfficialDopaProvider: not implemented]
+    Backend --> Members[(Cooperative member database)]
 ```
 
 ## Current Status
@@ -36,11 +38,29 @@ Validated through the installed service:
 
 Still incomplete:
 
-- Code signing. Published binaries are currently unsigned.
-- Thai ID personal-data reading. `POST /api/v1/card/read` returns `THAI_CARD_PROTOCOL_NOT_CONFIGURED`.
+- Code signing. The signing pipeline is implemented and tested, but no release has been signed with a
+  real organizational certificate on a hardware token/HSM. See [docs/PRODUCTION-SIGNING-PLAN.md](docs/PRODUCTION-SIGNING-PLAN.md).
+- **Thai ID card reading — `BLOCKED_OFFICIAL_PROTOCOL_REQUIRED`.** Phase 13A implemented the provider
+  abstraction, read orchestration, `card.read` permission, audit trail, cooperative member
+  verification flow, UI, and tests. No authorized provider exists, so `POST /api/v1/card/read`
+  returns `THAI_CARD_PROTOCOL_NOT_CONFIGURED`. Implementing one requires official Department of
+  Provincial Administration technical material — command sets from blogs, unofficial repositories,
+  or forum posts must not be used. See [docs/THAI-CARD-PROVIDER.md](docs/THAI-CARD-PROVIDER.md).
+- Member verification runs against a development mock. The database seam, statement validation,
+  error sanitization, and authenticated staff identity are complete, but **no schema, table, column,
+  connection detail, or database engine has been supplied**, so nothing is connected to the live
+  cooperative system. See [docs/MEMBER-DATABASE-INTEGRATION.md](docs/MEMBER-DATABASE-INTEGRATION.md)
+  for exactly what is needed.
 - Phase 10 browser pilot acceptance for `examples/nextjs-client` must still be run with the installed service and real hardware before committing the web integration as pilot-ready.
 
-No Citizen ID, owner name, address, birth date, or photo has been read or documented.
+No Citizen ID, owner name, address, birth date, or photo has been read or documented. Every citizen
+ID in this repository is a synthetic, checksum-valid test value.
+
+### Phase 13A scope
+
+Reads the **13-digit citizen ID only**, to match against the cooperative member database. Photo,
+address, name, birth date, and religion are out of scope and are not read — the contracts have no
+field for them. This is preliminary identity verification, not proof of identity on its own.
 
 ## Prerequisites
 
@@ -103,8 +123,26 @@ The browser must get a fresh JWT from a server-side token broker for every Agent
 - `GET /api/v1/readers` authenticated reader list.
 - `GET /api/v1/card/status?readerName=...` authenticated current card status; auto-selects when one reader exists.
 - `POST /api/v1/card/atr` authenticated ATR read.
-- `POST /api/v1/card/read` authenticated, currently returns `THAI_CARD_PROTOCOL_NOT_CONFIGURED`.
+- `POST /api/v1/card/read` authenticated **and** requires the `card.read` permission. Returns the
+  13-digit citizen ID only. Currently returns `THAI_CARD_PROTOCOL_NOT_CONFIGURED`.
 - `GET /api/v1/events` authenticated Server-Sent Events for reader/card changes.
+
+The Next.js example adds two server-side member verification routes. Both match a citizen ID against
+the cooperative member directory and return member data plus a **masked** citizen ID; the raw
+citizen ID is never stored in the browser, never logged, and never returned.
+
+- `POST /api/member/verify` — **production**. Resolves the operator from a server-verified session
+  and fails closed when staff auth or the member directory is unconfigured.
+- `POST /api/member-verification/id-card` — **`EXAMPLE_ONLY_NOT_FOR_PRODUCTION`**. Trusts a client
+  header for operator identity and serves mock data; returns 404 outside development.
+
+Because card reading is blocked, a **development-only** manual harness stands in for the card read at
+`http://localhost:3000/dev/member-verification` (`npm run dev` only; 404 in production). It offers
+the four mock scenarios, renders the Member Card with a masked citizen ID, and includes a simulated
+CardRemoved button.
+
+See [docs/MEMBER-IDENTITY-VERIFICATION.md](docs/MEMBER-IDENTITY-VERIFICATION.md) and
+[docs/MEMBER-DATABASE-INTEGRATION.md](docs/MEMBER-DATABASE-INTEGRATION.md).
 
 ## Publish And Service Scripts
 
